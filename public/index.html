@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyMemes GIF — Animated Memes Library</title>
+  <meta name="description" content="Discover, search, watch, copy and share thousands of animated GIF memes — trending, reactions, animals, anime, movies and more, powered by Giphy." />
+  <meta name="keywords" content="gifs, memes, animated, giphy, reactions, trending, mymemes" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1" />
+  <link rel="shortcut icon" href="/favicon.svg?v=1" />
+  <link rel="apple-touch-icon" href="/favicon.svg?v=1" />
+  <meta name="theme-color" content="#ffffff" />
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('mymemes_theme') === 'dark') {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Cairo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css?v=1" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="glass" id="header">
+    <div class="container header-inner">
+      <div class="logo">
+        <a href="/" class="logo-icon" aria-label="MyMemes GIF">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"></rect><text x="12" y="16" font-size="9" font-weight="800" text-anchor="middle" fill="currentColor" stroke="none">GIF</text></svg>
+        </a>
+        <div>
+          <h1 class="site-name text-shimmer" data-i18n="siteName">MyMemes GIF</h1>
+          <p class="site-tagline" data-i18n="siteTagline">Animated Memes Library</p>
+        </div>
+      </div>
+
+      <div class="search-bar desktop-only">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+        <input type="text" id="search" data-i18n-ph="searchPlaceholder" placeholder="Search GIFs..." />
+      </div>
+
+      <div class="header-actions">
+        <a href="https://mymemes.pages.dev" class="switch-site-btn" id="switch-site-btn" title="MyMemes Sounds" target="_blank" rel="noopener">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"></path></svg>
+          <span data-i18n="soundsSite">Sounds</span>
+        </a>
+        <span class="count-badge">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="9" cy="9" r="1.5"></circle><path d="m21 15-3.5-3.5L7 21"></path></svg>
+          <span id="header-count">0</span> <span data-i18n="gifsCount">GIFs</span>
+        </span>
+        <button class="icon-btn" id="theme-btn" aria-label="Theme">
+          <span class="icon-moon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+          <span class="icon-sun"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+        </button>
+        <div class="lang-switcher" id="lang-switcher">
+          <button class="lang-btn" id="lang-btn" aria-label="Language">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+            <span class="lang-current-label">English</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
+          <div class="lang-dropdown" id="lang-dropdown" hidden></div>
+        </div>
+        <button class="icon-btn mobile-only" id="menu-toggle" aria-label="Menu">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+        </button>
+      </div>
+    </div>
+    <div class="mobile-search mobile-only" id="mobile-search" hidden>
+      <div class="search-bar">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+        <input type="text" id="search-mobile" data-i18n-ph="searchPlaceholder" placeholder="Search GIFs..." />
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero -->
+    <section class="hero">
+      <div class="hero-glow"></div>
+      <div class="container hero-content">
+        <div class="hero-badge">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+          <span data-i18n="heroBadge">Watch. Copy. Share.</span>
+        </div>
+        <h2 class="hero-title text-shimmer" data-i18n="heroTitle">Explore the GIFs</h2>
+        <p class="hero-sub">
+          <span data-i18n="heroSubtitle">Thousands of animated GIF memes across every category — reactions, animals, anime, movies, music and more.</span><br>
+          <span data-i18n="heroSubtitleLine2">Watch, copy embed links, and share!</span>
+        </p>
+        <div class="hero-stats" id="hero-stats">
+          <div class="stat"><div class="stat-value" id="stat-gifs">0</div><div class="stat-label" data-i18n="statGifs">GIFs</div></div>
+          <div class="stat-divider"></div>
+          <div class="stat"><div class="stat-value" id="stat-categories">0</div><div class="stat-label" data-i18n="statCategories">Categories</div></div>
+          <div class="stat-divider"></div>
+          <div class="stat"><div class="stat-value" id="stat-plays">0</div><div class="stat-label" data-i18n="statPlays">Plays</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Categories -->
+    <section class="container categories-section">
+      <div class="section-header">
+        <h3 data-i18n="categoriesTitle">Categories</h3>
+        <div class="section-line"></div>
+      </div>
+      <div class="category-list" id="category-list"></div>
+    </section>
+
+    <!-- Sort Bar -->
+    <section class="container sort-bar">
+      <p class="results-info" id="results-info">0 GIFs</p>
+      <div class="sort-buttons">
+        <span class="sort-label desktop-only" data-i18n="sortBy">Sort:</span>
+        <button class="sort-btn" data-sort="trending" data-i18n="sortTrending">Trending</button>
+        <button class="sort-btn" data-sort="popular" data-i18n="sortPopular">Popular</button>
+        <button class="sort-btn" data-sort="name" data-i18n="sortName">Name</button>
+      </div>
+    </section>
+
+    <!-- GIFs Grid -->
+    <section class="container sounds-section">
+      <div id="sounds-grid" class="sounds-grid gifs-grid"></div>
+      <div id="loading-skeleton" class="sounds-grid" hidden>
+        <div class="card-skeleton gif-skeleton"></div><div class="card-skeleton gif-skeleton"></div><div class="card-skeleton gif-skeleton"></div><div class="card-skeleton gif-skeleton"></div>
+        <div class="card-skeleton gif-skeleton"></div><div class="card-skeleton gif-skeleton"></div><div class="card-skeleton gif-skeleton"></div><div class="card-skeleton gif-skeleton"></div>
+      </div>
+      <div id="empty-state" class="empty-state" hidden>
+        <div class="empty-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="9" cy="9" r="1.5"></circle><path d="m21 15-3.5-3.5L7 21"></path></svg>
+        </div>
+        <h3 data-i18n="noGifs">No GIFs found</h3>
+        <p id="empty-msg"></p>
+        <button class="btn-outline" id="clear-search-btn" data-i18n="clearSearch" hidden>Clear search</button>
+      </div>
+      <div id="load-more-trigger" class="load-more-trigger">
+        <div id="loading-more" class="loading-more" hidden>
+          <div class="spinner-wrap">
+            <div class="spinner"></div>
+            <svg class="spinner-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="9" cy="9" r="1.5"></circle><path d="m21 15-3.5-3.5L7 21"></path></svg>
+          </div>
+          <p data-i18n="loadingMore">Loading more...</p>
+        </div>
+        <div id="all-loaded" class="all-loaded" hidden>
+          <div class="line-dec"></div>
+          <p><span data-i18n="allLoaded">All GIFs loaded</span> (<span id="loaded-count">0</span>)</p>
+          <div class="line-dec"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-logo">
+        <div class="logo-icon-sm">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"></rect><text x="12" y="16" font-size="9" font-weight="800" text-anchor="middle" fill="currentColor" stroke="none">GIF</text></svg>
+        </div>
+        <div>
+          <span class="text-shimmer" data-i18n="siteName">MyMemes GIF</span>
+          <p class="site-tagline" data-i18n="siteTagline">Animated Memes Library</p>
+        </div>
+      </div>
+      <p class="footer-credit">
+        <span data-i18n="gifsFrom">GIFs from</span>
+        <a href="https://giphy.com" target="_blank" rel="noopener noreferrer">Giphy.com</a>
+      </p>
+      <div class="footer-plays">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+        <span><span id="footer-plays">0</span> <span data-i18n="playsCount">plays</span></span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/app.js?v=1"></script>
+</body>
+</html>

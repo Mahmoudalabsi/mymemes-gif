@@ -1,0 +1,59 @@
+[build]
+  # Pure static site — no build step, no Next.js plugin
+  command = ""
+  publish = "public"
+
+[functions]
+  directory = "netlify/functions"
+
+# Never serve Cloudflare/Pages config files as content
+[[redirects]]
+  from = "/_headers"
+  to = "/404.html"
+  status = 404
+
+[[redirects]]
+  from = "/_redirects"
+  to = "/404.html"
+  status = 404
+
+# Security headers
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# Never cache HTML — always revalidate so users get fresh asset URLs
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# Cache JSON data for one day
+[[headers]]
+  for = "/data/*.json"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+# Long-cache static assets (versioned via ?v= query param in index.html)
+[[headers]]
+  for = "/style.css"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
+
+[[headers]]
+  for = "/app.js"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
+
+[[headers]]
+  for = "/favicon.svg"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"

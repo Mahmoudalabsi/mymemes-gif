@@ -1,0 +1,4 @@
+# Cloudflare Pages redirects — block internal/server-only paths
+/functions/* /404.html 404
+/wrangler.toml /404.html 404
+/assetsignore /404.html 404
