@@ -615,8 +615,23 @@ function initSortButtons() {
 function renderGifs(replace = false) {
   const grid = $('#sounds-grid');
   if (!grid) return;
-  if (replace) grid.innerHTML = '';
-  state.gifs.forEach(gif => grid.appendChild(renderGifCard(gif)));
+  if (replace) {
+    // Full rebuild (first load, category/search/sort change)
+    grid.innerHTML = '';
+    state.gifs.forEach(gif => grid.appendChild(renderGifCard(gif)));
+  } else {
+    // Incremental append: only add cards that are NOT already in the DOM.
+    // Appending the whole array here used to re-attach every previously
+    // rendered card on each new page — the "duplicates when scrolling" bug.
+    const already = grid.children.length;
+    if (already < state.gifs.length) {
+      const frag = document.createDocumentFragment();
+      for (let i = already; i < state.gifs.length; i++) {
+        frag.appendChild(renderGifCard(state.gifs[i]));
+      }
+      grid.appendChild(frag);
+    }
+  }
   // Toggle empty state
   const empty = $('#empty-state');
   if (state.gifs.length === 0) {
@@ -668,6 +683,7 @@ async function loadNextPage() {
   if (state.loading || state.allGifsLoaded) return;
   state.loading = true;
   $('#loading-more').hidden = false;
+  let orderChanged = false;
   try {
     const data = await fetchGifs({ offset: state.offset, search: state.search, category: state.category });
     if (!data || !data.ok) {
@@ -678,17 +694,26 @@ async function loadNextPage() {
       if (newGifs.length === 0) {
         state.allGifsLoaded = true;
       } else {
-        // Dedupe
+        // Dedupe by id (guards against server-side order shifts between pages)
         const seen = new Set(state.gifs.map(g => g.id));
         const fresh = newGifs.filter(g => !seen.has(g.id));
-        state.gifs = state.gifs.concat(sortGifs(fresh));
-        state.offset += fresh.length;
+        state.gifs = state.gifs.concat(fresh);
+        // Advance by what the server actually returned — advancing by fresh.length
+        // would re-fetch overlapping windows and stall near the tail.
+        state.offset += newGifs.length;
+        if (state.sort !== 'trending') {
+          // keep the active sort applied across appended pages — the array is
+          // re-sorted GLOBALLY, so the DOM must be rebuilt (not incrementally
+          // appended) to reflect the new order.
+          state.gifs = sortGifs(state.gifs);
+          orderChanged = true;
+        }
         if (newGifs.length < PAGE_SIZE || state.offset >= state.total) {
           state.allGifsLoaded = true;
         }
       }
     }
-    renderGifs(false);
+    renderGifs(orderChanged);
   } catch (e) {
     console.error('loadNextPage error:', e);
     state.allGifsLoaded = true;

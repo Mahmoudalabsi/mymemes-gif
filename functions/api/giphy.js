@@ -1,13 +1,17 @@
 /**
- * Cloudflare Pages Function — Giphy Proxy (v2: big database)
- * ==========================================================
+ * Cloudflare Pages Function — Giphy Proxy (v3: compact big database)
+ * ==================================================================
  * Serves GIFs from Giphy API when env.GIPHY_API_KEY is set,
- * otherwise from the aggregated fallback database (~34.5k GIFs
- * aggregated from giphy.com + tenor.com, direct CDN URLs).
+ * otherwise from the aggregated fallback database (compact format v3).
+ *
+ * Compact record: { s:'g'|'t', i:<id>, l:<tenor-slug>, t:<title>, c:<cat>, p:<plays> }
+ * Records are expanded to full shape only for the returned page slice.
+ * The JSON is pre-sorted at build time — trending requests are pure slices.
  *
  * Endpoints:
  *   GET /api/giphy?trending=1&offset=0&limit=24
  *   GET /api/giphy?search=QUERY&offset=0&limit=24
+ *   GET /api/giphy?cat=animals&offset=0&limit=24
  *   GET /api/giphy?categories=1
  */
 
@@ -63,20 +67,73 @@ async function loadFallback(request) {
   _fallbackMeta = { origin, fetchedAt: Date.now() };
   _fallbackPromise = (async () => {
     try {
-      const r = await fetch(`${origin}/data/fallback-gifs.json`, {
+      const r = await fetch(`${origin}/data/fallback-gifs.json?v=2`, {
         cf: { cacheTtl: 86400, cacheEverything: true },
       });
       if (r.ok) return await r.json();
     } catch (e) {}
     // Retry without cf options
     try {
-      const r = await fetch(`${origin}/data/fallback-gifs.json`);
+      const r = await fetch(`${origin}/data/fallback-gifs.json?v=2`);
       if (r.ok) return await r.json();
     } catch (e) {}
     return { gifs: [], total: 0, categories: [] };
   })();
   return _fallbackPromise;
 }
+
+/* ---------- Compact record expansion ---------- */
+
+function titleFromSlug(slug) {
+  const parts = String(slug || '').replace(/\.(gif|webp|mp4|png|jpg)$/i, '').split(/[-_]+/).filter(Boolean);
+  const title = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ').slice(0, 80);
+  return title || 'GIF';
+}
+
+function expandRecord(r) {
+  // Legacy full-record passthrough (v2 format)
+  if (r.url) return r;
+  if (r.s === 't') {
+    const slug = r.l || r.i;
+    return {
+      id: r.i,
+      title: r.t || titleFromSlug(slug),
+      cat: r.c || 'trending',
+      url: `https://media.tenor.com/${r.i}AAAAd/${slug}.gif`,
+      thumb: `https://media.tenor.com/${r.i}AAAAM/${slug}.gif`,
+      preview: `https://media.tenor.com/${r.i}AAAA1/${slug}.webp`,
+      plays: r.p || 0,
+      tags: [],
+      source: 'tenor',
+    };
+  }
+  return {
+    id: r.i,
+    title: r.t || titleFromSlug(r.i),
+    cat: r.c || 'trending',
+    url: `https://media.giphy.com/media/${r.i}/giphy.gif`,
+    thumb: `https://media.giphy.com/media/${r.i}/200.gif`,
+    preview: `https://media.giphy.com/media/${r.i}/giphy_s.gif`,
+    plays: r.p || 0,
+    tags: [],
+    source: 'giphy',
+  };
+}
+
+// Search text per compact record (no allocation: slug for tenor, title for giphy)
+function searchText(r) {
+  return r.s === 't' ? (r.l || '') : (r.t || '');
+}
+
+function recCat(r) {
+  return r.c || r.cat || 'trending';
+}
+
+function recTitle(r) {
+  return r.t || r.title || '';
+}
+
+/* ---------- Live Giphy API (optional key) ---------- */
 
 function transformGiphyItem(item) {
   const id = item.id || '';
@@ -108,10 +165,7 @@ async function callGiphy(env, endpoint, params) {
   return await r.json();
 }
 
-function categoryPriority(cat) {
-  const i = CAT_PRIORITY.indexOf(cat);
-  return i === -1 ? 99 : i;
-}
+/* ---------- Category auto-matching for live search results ---------- */
 
 const CAT_KEYWORDS = (() => {
   const map = {
@@ -144,6 +198,13 @@ function matchCategory(text) {
   return 'trending';
 }
 
+function categoryPriority(cat) {
+  const i = CAT_PRIORITY.indexOf(cat);
+  return i === -1 ? 99 : i;
+}
+
+/* ---------- Request handler ---------- */
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -157,21 +218,26 @@ export async function onRequest(context) {
     }});
   }
 
-  // Categories endpoint — cached with the DB
+  // Categories endpoint — uses precomputed cat_counts when available
   if (params.get('categories') === '1') {
     const fb = await loadFallback(request);
-    const counts = {};
-    for (const g of (fb.gifs || [])) {
-      counts[g.cat] = (counts[g.cat] || 0) + 1;
+    const gifs = fb.gifs || [];
+    let counts = fb.cat_counts || null;
+    if (!counts) {
+      counts = {};
+      for (const g of gifs) {
+        const c = recCat(g);
+        counts[c] = (counts[c] || 0) + 1;
+      }
     }
     const cats = CATEGORY_DEFS.map(c => ({
       id: c.id,
       label_en: CAT_LABELS[c.id]?.en || c.id,
       label_ar: CAT_LABELS[c.id]?.ar || c.id,
       label_ro: CAT_LABELS[c.id]?.ro || c.id,
-      count: counts[c.id] || (c.id === 'trending' ? (fb.total || (fb.gifs || []).length) : 0),
+      count: counts[c.id] || (c.id === 'trending' ? (fb.total || gifs.length) : 0),
     })).filter(c => c.count > 0 || c.id === 'trending');
-    return json({ ok: true, categories: cats, total: fb.total || (fb.gifs || []).length });
+    return json({ ok: true, categories: cats, total: fb.total || gifs.length });
   }
 
   const limit = Math.min(parseInt(params.get('limit') || '24', 10), 50);
@@ -203,7 +269,7 @@ export async function onRequest(context) {
     }
   }
 
-  // Fallback database (34.5k GIFs)
+  // Fallback database (compact v3)
   const fb = await loadFallback(request);
   let pool = fb.gifs || [];
   if (pool.length === 0) {
@@ -212,35 +278,35 @@ export async function onRequest(context) {
 
   if (catParam && CAT_PRIORITY.includes(catParam) && catParam !== 'trending') {
     // Explicit category filter
-    pool = pool.filter(g => g.cat === catParam);
+    pool = pool.filter(g => recCat(g) === catParam);
   } else if (search) {
     // If search matches a category id, treat as category browse
     const qLower = search.toLowerCase();
     if (CAT_PRIORITY.includes(qLower) && qLower !== 'trending') {
-      pool = pool.filter(g => g.cat === qLower);
+      pool = pool.filter(g => recCat(g) === qLower);
     } else {
       const terms = qLower.split(/\s+/).filter(Boolean);
       pool = pool.filter(g => {
-        const title = g.title ? g.title.toLowerCase() : '';
+        const text = searchText(g).toLowerCase();
+        if (!text) return false;
         for (const t of terms) {
-          if (!title.includes(t)) return false;
+          if (!text.includes(t)) return false;
         }
         return true;
       });
-      // Relevance: prefix matches first
+      // Relevance: prefix matches first (stable)
       pool.sort((a, b) => {
-        const ap = a.title.toLowerCase().startsWith(qLower) ? 0 : 1;
-        const bp = b.title.toLowerCase().startsWith(qLower) ? 0 : 1;
+        const ap = searchText(a).toLowerCase().startsWith(qLower) ? 0 : 1;
+        const bp = searchText(b).toLowerCase().startsWith(qLower) ? 0 : 1;
         if (ap !== bp) return ap - bp;
-        return 0;
+        // tie-break deterministic by id
+        return (a.i || a.id || '') < (b.i || b.id || '') ? -1 : 1;
       });
     }
-  } else if (trending) {
-    // stable sort by category priority (already sorted in the JSON, but keep for safety)
-    pool = [...pool].sort((a, b) => categoryPriority(a.cat) - categoryPriority(b.cat));
   }
+  // trending: JSON is pre-sorted at build time — pure slice, no sort cost
 
-  const slice = pool.slice(offset, offset + limit);
+  const slice = pool.slice(offset, offset + limit).map(expandRecord);
   return json({
     ok: true,
     gifs: slice,

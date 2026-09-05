@@ -1,12 +1,18 @@
 /**
- * Netlify Function — Giphy proxy mirror (v2: big database).
- * Same behavior as functions/api/giphy.js, Netlify handler signature.
- * Falls back to /data/fallback-gifs.json (~34.5k GIFs) when no GIPHY_API_KEY.
+ * Netlify Function — Giphy proxy mirror (v3: compact big database).
+ * Same logic as functions/api/giphy.js with Netlify handler signature.
+ * Compact records expanded on serve; JSON pre-sorted at build time.
  */
 
-const FALLBACK_URL = 'https://raw.githubusercontent.com/Mahmoudalabsi/mymemes-gif/main/public/data/fallback-gifs.json';
+let _fallbackPromise = null;      // per-isolate cache of parsed fallback DB
+let _fallbackMeta = null;         // { origin, fetchedAt }
 
-const CATEGORY_DEFS = ['trending', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
+const CATEGORY_DEFS = [
+  { id: 'trending' }, { id: 'reactions' }, { id: 'memes' }, { id: 'animals' },
+  { id: 'anime' }, { id: 'gaming' }, { id: 'cartoons' }, { id: 'movies' },
+  { id: 'music' }, { id: 'sports' }, { id: 'food' }, { id: 'nature' },
+  { id: 'tech' }, { id: 'love' },
+];
 
 const CAT_LABELS = {
   trending:   { en: 'Trending',  ar: 'الرائج',      ro: 'Populare' },
@@ -27,62 +33,112 @@ const CAT_LABELS = {
 
 const CAT_PRIORITY = ['trending', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
 
-// per-lambda-instance cache
-let _fbCache = { key: null, promise: null };
-
-function jsonBody(data, status = 200) {
+function json(data, status = 200, cacheMaxAge = 60) {
   return {
     statusCode: status,
     headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Cache-Control': 'public, max-age=60',
+      'content-type': 'application/json; charset=utf-8',
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-allow-headers': 'Content-Type',
+      'cache-control': `public, max-age=${cacheMaxAge}, s-maxage=${cacheMaxAge * 6}`,
     },
     body: JSON.stringify(data),
   };
 }
 
-async function loadFallback(event) {
-  const proto = (event.headers['x-forwarded-proto'] || 'https');
-  const host = event.headers['host'] || '';
-  const key = `${proto}://${host}`;
-  if (_fbCache.key === key && _fbCache.promise) return _fbCache.promise;
-  _fbCache.key = key;
-  _fbCache.promise = (async () => {
+const FALLBACK_URL = 'https://raw.githubusercontent.com/Mahmoudalabsi/mymemes-gif/main/public/data/fallback-gifs.json';
+
+async function loadFallback() {
+  if (_fallbackPromise) return _fallbackPromise;
+  _fallbackPromise = (async () => {
     try {
-      if (host) {
-        const r = await fetch(`${key}/data/fallback-gifs.json`);
-        if (r.ok) return await r.json();
-      }
+      const r = await fetch(`${FALLBACK_URL}?t=${Date.now()}`);
+      if (r.ok) return await r.json();
     } catch (e) {}
     try {
-      const r = await fetch(FALLBACK_URL);
+      const r = await fetch('/data/fallback-gifs.json');
       if (r.ok) return await r.json();
     } catch (e) {}
     return { gifs: [], total: 0, categories: [] };
   })();
-  return _fbCache.promise;
+  return _fallbackPromise;
 }
+
+/* ---------- Compact record expansion ---------- */
+
+function titleFromSlug(slug) {
+  const parts = String(slug || '').replace(/\.(gif|webp|mp4|png|jpg)$/i, '').split(/[-_]+/).filter(Boolean);
+  const title = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ').slice(0, 80);
+  return title || 'GIF';
+}
+
+function expandRecord(r) {
+  // Legacy full-record passthrough (v2 format)
+  if (r.url) return r;
+  if (r.s === 't') {
+    const slug = r.l || r.i;
+    return {
+      id: r.i,
+      title: r.t || titleFromSlug(slug),
+      cat: r.c || 'trending',
+      url: `https://media.tenor.com/${r.i}AAAAd/${slug}.gif`,
+      thumb: `https://media.tenor.com/${r.i}AAAAM/${slug}.gif`,
+      preview: `https://media.tenor.com/${r.i}AAAA1/${slug}.webp`,
+      plays: r.p || 0,
+      tags: [],
+      source: 'tenor',
+    };
+  }
+  return {
+    id: r.i,
+    title: r.t || titleFromSlug(r.i),
+    cat: r.c || 'trending',
+    url: `https://media.giphy.com/media/${r.i}/giphy.gif`,
+    thumb: `https://media.giphy.com/media/${r.i}/200.gif`,
+    preview: `https://media.giphy.com/media/${r.i}/giphy_s.gif`,
+    plays: r.p || 0,
+    tags: [],
+    source: 'giphy',
+  };
+}
+
+// Search text per compact record (no allocation: slug for tenor, title for giphy)
+function searchText(r) {
+  return r.s === 't' ? (r.l || '') : (r.t || '');
+}
+
+function recCat(r) {
+  return r.c || r.cat || 'trending';
+}
+
+function recTitle(r) {
+  return r.t || r.title || '';
+}
+
+/* ---------- Live Giphy API (optional key) ---------- */
 
 function transformGiphyItem(item) {
   const id = item.id || '';
   const title = (item.title || 'GIF').trim();
-  let slug = item.slug || id;
+  let slug = item.slug || (item.url ? item.url.replace(/^\/?gifs\//, '') : id);
   slug = slug.replace(/-[A-Za-z0-9]+$/, '');
   return {
-    id, slug,
+    id,
+    slug,
     title: title.length > 60 ? title.slice(0, 57) + '…' : title,
     cat: 'trending',
     url: item.images?.original?.url || `https://media.giphy.com/media/${id}/giphy.gif`,
-    thumb: item.images?.fixed_height_small?.url || `https://media.giphy.com/media/${id}/200.gif`,
+    thumb: item.images?.fixed_height_small?.url || item.images?.downsized?.url || `https://media.giphy.com/media/${id}/200.gif`,
     preview: item.images?.fixed_height_small_still?.url || `https://media.giphy.com/media/${id}/giphy_s.gif`,
-    plays: 0, tags: [], source: 'giphy'
+    plays: 0,
+    tags: [],
+    source: 'giphy'
   };
 }
 
-async function callGiphy(endpoint, params) {
-  const apiKey = process.env.GIPHY_API_KEY;
+async function callGiphy(env, endpoint, params) {
+  const apiKey = env?.GIPHY_API_KEY;
   if (!apiKey) return null;
   const url = new URL(`https://api.giphy.com/v1/${endpoint}`);
   url.searchParams.set('api_key', apiKey);
@@ -92,80 +148,158 @@ async function callGiphy(endpoint, params) {
   return await r.json();
 }
 
+/* ---------- Category auto-matching for live search results ---------- */
+
+const CAT_KEYWORDS = (() => {
+  const map = {
+    reactions: ['laugh', 'cry', 'sad', 'happy', 'shock', 'angry', 'love', 'heart', 'wow', 'omg', 'facepalm', 'smile', 'wink', 'thumbs', 'clap', 'dance', 'wave', 'nod', 'shrug', 'sigh', 'bored', 'confused', 'scared', 'excited', 'tired', 'hungry', 'sick', 'yawn', 'lol', 'lmao', 'funny', 'haha'],
+    memes: ['meme', 'dank', 'viral', 'tiktok', 'instagram', 'twitter', 'facebook', 'youtube', 'funny', 'joke', 'comedy', 'spongebob', 'rick-roll', 'work', 'office', 'school', 'birthday', 'christmas', 'halloween', 'party'],
+    animals: ['cat', 'dog', 'puppy', 'kitten', 'horse', 'cow', 'pig', 'bird', 'fish', 'shark', 'snake', 'frog', 'rabbit', 'panda', 'bear', 'fox', 'wolf', 'lion', 'tiger', 'monkey', 'elephant', 'dino', 'duck', 'owl', 'penguin', 'hamster', 'bunny'],
+    anime: ['anime', 'manga', 'kawaii', 'senpai', 'waifu', 'mecha', 'gundam', 'pokemon', 'naruto', 'ghibli', 'pikachu'],
+    gaming: ['game', 'gaming', 'arcade', 'nintendo', 'playstation', 'xbox', 'minecraft', 'mario', 'zelda', 'sonic', 'fortnite'],
+    movies: ['movie', 'film', 'cinema', 'marvel', 'batman', 'superman', 'spiderman', 'avengers', 'star-wars', 'harry-potter', 'disney'],
+    music: ['music', 'song', 'dance', 'singing', 'guitar', 'drum', 'piano', 'concert', 'dj', 'rap', 'rock', 'metal', 'pop', 'jazz'],
+    sports: ['sport', 'football', 'soccer', 'basketball', 'baseball', 'tennis', 'hockey', 'golf', 'boxing', 'mma', 'wrestling', 'wwe', 'ufc', 'skate', 'snowboard', 'ski', 'surf', 'swim', 'cycling', 'gym', 'goal', 'slam-dunk', 'touchdown', 'nba'],
+    cartoons: ['cartoon', 'rick', 'morty', 'simpsons', 'family-guy', 'south-park', 'spongebob', 'adventure-time', 'futurama', 'avatar', 'steven-universe', 'disney'],
+    food: ['food', 'pizza', 'burger', 'taco', 'sushi', 'ramen', 'cake', 'cookie', 'donut', 'coffee', 'tea', 'beer', 'wine', 'chocolate', 'ice-cream'],
+    nature: ['nature', 'mountain', 'ocean', 'sea', 'beach', 'sunset', 'sunrise', 'rain', 'snow', 'storm', 'cloud', 'sky', 'star', 'galaxy', 'space', 'forest', 'tree', 'flower', 'waterfall', 'rainbow'],
+    tech: ['tech', 'computer', 'laptop', 'phone', 'internet', 'wifi', 'coding', 'programmer', 'ai', 'robot', 'cyber', 'hacker', 'crypto', 'bitcoin'],
+    love: ['love', 'heart', 'kiss', 'hug', 'romance', 'romantic', 'cupid', 'valentine', 'wedding', 'marriage', 'couple', 'relationship'],
+  };
+  const out = [];
+  for (const [cat, kws] of Object.entries(map)) {
+    for (const kw of kws) out.push({ kw, cat });
+  }
+  return out;
+})();
+
+function matchCategory(text) {
+  const t = (text || '').toLowerCase();
+  for (const { kw, cat } of CAT_KEYWORDS) {
+    if (t.includes(kw)) return cat;
+  }
+  return 'trending';
+}
+
 function categoryPriority(cat) {
   const i = CAT_PRIORITY.indexOf(cat);
   return i === -1 ? 99 : i;
 }
 
+/* ---------- Request handler ---------- */
+
 export async function handler(event) {
-  const qs = event.queryStringParameters || {};
+  const env = process.env;
+  const q = event.queryStringParameters || {};
+  const params = new URLSearchParams(q);
+  const method = event.httpMethod || 'GET';
 
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: { 'Access-Control-Allow-Origin': '*' } };
+  if (method === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, OPTIONS',
+        'access-control-allow-headers': 'Content-Type',
+      },
+      body: '',
+    };
   }
 
-  if (qs.categories === '1') {
-    const fb = await loadFallback(event);
-    const counts = {};
-    for (const g of (fb.gifs || [])) counts[g.cat] = (counts[g.cat] || 0) + 1;
+  // Categories endpoint — uses precomputed cat_counts when available
+  if (params.get('categories') === '1') {
+    const fb = await loadFallback();
+    const gifs = fb.gifs || [];
+    let counts = fb.cat_counts || null;
+    if (!counts) {
+      counts = {};
+      for (const g of gifs) {
+        const c = recCat(g);
+        counts[c] = (counts[c] || 0) + 1;
+      }
+    }
     const cats = CATEGORY_DEFS.map(c => ({
-      id: c,
-      label_en: CAT_LABELS[c]?.en || c,
-      label_ar: CAT_LABELS[c]?.ar || c,
-      label_ro: CAT_LABELS[c]?.ro || c,
-      count: counts[c] || (c === 'trending' ? (fb.total || (fb.gifs || []).length) : 0),
+      id: c.id,
+      label_en: CAT_LABELS[c.id]?.en || c.id,
+      label_ar: CAT_LABELS[c.id]?.ar || c.id,
+      label_ro: CAT_LABELS[c.id]?.ro || c.id,
+      count: counts[c.id] || (c.id === 'trending' ? (fb.total || gifs.length) : 0),
     })).filter(c => c.count > 0 || c.id === 'trending');
-    return jsonBody({ ok: true, categories: cats, total: fb.total || (fb.gifs || []).length });
+    return json({ ok: true, categories: cats, total: fb.total || gifs.length });
   }
 
-  const limit = Math.min(parseInt(qs.limit || '24', 10), 50);
-  const offset = parseInt(qs.offset || '0', 10);
-  const search = (qs.search || '').trim();
-  const catParam = (qs.cat || '').trim().toLowerCase();
-  const trending = qs.trending === '1' || (!search && !catParam && !qs.categories);
+  const limit = Math.min(parseInt(params.get('limit') || '24', 10), 50);
+  const offset = parseInt(params.get('offset') || '0', 10);
+  const search = (params.get('search') || '').trim();
+  const catParam = (params.get('cat') || '').trim().toLowerCase();
+  const trending = params.get('trending') === '1' || (!search && !catParam && !params.get('categories'));
 
-  if (process.env.GIPHY_API_KEY) {
+  // Try Giphy API first (only when key is configured)
+  if (env?.GIPHY_API_KEY) {
     try {
       const result = search
-        ? await callGiphy('gifs/search', { q: search, limit, offset, rating: 'pg', lang: 'en' })
+        ? await callGiphy(env, 'gifs/search', { q: search, limit, offset, rating: 'pg', lang: 'en' })
         : trending
-          ? await callGiphy('gifs/trending', { limit, offset, rating: 'pg' })
+          ? await callGiphy(env, 'gifs/trending', { limit, offset, rating: 'pg' })
           : null;
       if (result && Array.isArray(result.data) && result.data.length > 0) {
         const gifs = result.data.map(transformGiphyItem);
-        return jsonBody({ ok: true, gifs, total: result.pagination?.total_count || gifs.length, offset, source: 'giphy' });
+        const cat = search ? matchCategory(search) : 'trending';
+        gifs.forEach(g => g.cat = cat);
+        return json({
+          ok: true, gifs,
+          total: result.pagination?.total_count || gifs.length,
+          offset, source: 'giphy'
+        }, 200, 60);
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('Giphy API error:', e.message);
+    }
   }
 
-  const fb = await loadFallback(event);
+  // Fallback database (compact v3)
+  const fb = await loadFallback();
   let pool = fb.gifs || [];
   if (pool.length === 0) {
-    return jsonBody({ ok: false, gifs: [], total: 0, source: 'none' });
+    return json({ ok: false, gifs: [], total: 0, source: 'none', error: 'no_api_key_and_no_fallback' }, 200, 30);
   }
 
   if (catParam && CAT_PRIORITY.includes(catParam) && catParam !== 'trending') {
-    pool = pool.filter(g => g.cat === catParam);
+    // Explicit category filter
+    pool = pool.filter(g => recCat(g) === catParam);
   } else if (search) {
+    // If search matches a category id, treat as category browse
     const qLower = search.toLowerCase();
     if (CAT_PRIORITY.includes(qLower) && qLower !== 'trending') {
-      pool = pool.filter(g => g.cat === qLower);
+      pool = pool.filter(g => recCat(g) === qLower);
     } else {
       const terms = qLower.split(/\s+/).filter(Boolean);
       pool = pool.filter(g => {
-        const title = g.title ? g.title.toLowerCase() : '';
-        return terms.every(t => title.includes(t));
+        const text = searchText(g).toLowerCase();
+        if (!text) return false;
+        for (const t of terms) {
+          if (!text.includes(t)) return false;
+        }
+        return true;
       });
+      // Relevance: prefix matches first (stable)
       pool.sort((a, b) => {
-        const ap = a.title.toLowerCase().startsWith(qLower) ? 0 : 1;
-        const bp = b.title.toLowerCase().startsWith(qLower) ? 0 : 1;
-        return ap - bp;
+        const ap = searchText(a).toLowerCase().startsWith(qLower) ? 0 : 1;
+        const bp = searchText(b).toLowerCase().startsWith(qLower) ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        // tie-break deterministic by id
+        return (a.i || a.id || '') < (b.i || b.id || '') ? -1 : 1;
       });
     }
-  } else if (trending) {
-    pool = [...pool].sort((a, b) => categoryPriority(a.cat) - categoryPriority(b.cat));
   }
+  // trending: JSON is pre-sorted at build time — pure slice, no sort cost
 
-  const slice = pool.slice(offset, offset + limit);
-  return jsonBody({ ok: true, gifs: slice, total: pool.length, offset, source: 'fallback' });
+  const slice = pool.slice(offset, offset + limit).map(expandRecord);
+  return json({
+    ok: true,
+    gifs: slice,
+    total: pool.length,
+    offset,
+    source: 'fallback'
+  }, 200, 60);
 }
