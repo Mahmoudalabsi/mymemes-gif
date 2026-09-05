@@ -370,8 +370,8 @@ async function fetchGifs(opts = {}) {
   if (search) {
     params.search = search;
   } else if (category && category !== 'trending') {
-    // Use search with the category keyword
-    params.search = category;
+    // Explicit category filter (server-side, filters the cat field)
+    params.cat = category;
   } else {
     params.trending = '1';
   }

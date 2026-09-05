@@ -10,6 +10,10 @@
  */
 
 const ALLOWED_HOSTS = new Set([
+  "media.tenor.com",
+  "media1.tenor.com",
+  "media2.tenor.com",
+  "media3.tenor.com",
   "media.giphy.com",
   "media1.giphy.com",
   "media2.giphy.com",

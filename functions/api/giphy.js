@@ -1,9 +1,9 @@
 /**
- * Cloudflare Pages Function — Giphy Proxy
- * ============================================
- * Forwards Giphy API requests with the server-side API key (env.GIPHY_API_KEY).
- * If the key is missing OR Giphy returns an error, gracefully falls back to the
- * curated static fallback-gifs.json (direct CDN URLs, no API key needed).
+ * Cloudflare Pages Function — Giphy Proxy (v2: big database)
+ * ==========================================================
+ * Serves GIFs from Giphy API when env.GIPHY_API_KEY is set,
+ * otherwise from the aggregated fallback database (~34.5k GIFs
+ * aggregated from giphy.com + tenor.com, direct CDN URLs).
  *
  * Endpoints:
  *   GET /api/giphy?trending=1&offset=0&limit=24
@@ -11,27 +11,34 @@
  *   GET /api/giphy?categories=1
  */
 
-const FALLBACK_URL = 'https://raw.githubusercontent.com/Mahmoudalabsi/mymemes-gif/main/public/data/fallback-gifs.json';
-// In Cloudflare Pages, the fallback file is also served locally:
-//   /data/fallback-gifs.json  (works in dev and prod)
-// We use the asset binding via context.env.ASSETS if available, else fetch from raw GitHub.
+let _fallbackPromise = null;      // per-isolate cache of parsed fallback DB
+let _fallbackMeta = null;         // { origin, fetchedAt }
 
 const CATEGORY_DEFS = [
-  { id: 'trending',   label_en: 'Trending',   label_ar: 'الرائج',         label_ro: 'Populare' },
-  { id: 'reactions',  label_en: 'Reactions',  label_ar: 'ردود الأفعال',    label_ro: 'Reacții' },
-  { id: 'animals',    label_en: 'Animals',    label_ar: 'حيوانات',         label_ro: 'Animale' },
-  { id: 'anime',      label_en: 'Anime',      label_ar: 'أنمي',            label_ro: 'Anime' },
-  { id: 'gaming',     label_en: 'Gaming',     label_ar: 'ألعاب',           label_ro: 'Jocuri' },
-  { id: 'movies',     label_en: 'Movies',     label_ar: 'أفلام',           label_ro: 'Filme' },
-  { id: 'music',      label_en: 'Music',      label_ar: 'موسيقى',          label_ro: 'Muzică' },
-  { id: 'sports',     label_en: 'Sports',     label_ar: 'رياضة',           label_ro: 'Sport' },
-  { id: 'memes',      label_en: 'Memes',      label_ar: 'ميمز',            label_ro: 'Meme-uri' },
-  { id: 'cartoons',   label_en: 'Cartoons',   label_ar: 'كرتون',           label_ro: 'Desene' },
-  { id: 'food',       label_en: 'Food',       label_ar: 'طعام',            label_ro: 'Mâncare' },
-  { id: 'nature',     label_en: 'Nature',     label_ar: 'طبيعة',           label_ro: 'Natură' },
-  { id: 'tech',       label_en: 'Tech',       label_ar: 'تقنية',           label_ro: 'Tehnologie' },
-  { id: 'love',       label_en: 'Love',       label_ar: 'حب',              label_ro: 'Dragoste' },
+  { id: 'trending' }, { id: 'reactions' }, { id: 'memes' }, { id: 'animals' },
+  { id: 'anime' }, { id: 'gaming' }, { id: 'cartoons' }, { id: 'movies' },
+  { id: 'music' }, { id: 'sports' }, { id: 'food' }, { id: 'nature' },
+  { id: 'tech' }, { id: 'love' },
 ];
+
+const CAT_LABELS = {
+  trending:   { en: 'Trending',  ar: 'الرائج',      ro: 'Populare' },
+  reactions:  { en: 'Reactions', ar: 'ردود الأفعال', ro: 'Reacții' },
+  memes:      { en: 'Memes',     ar: 'ميمز',        ro: 'Meme-uri' },
+  animals:    { en: 'Animals',   ar: 'حيوانات',      ro: 'Animale' },
+  anime:      { en: 'Anime',     ar: 'أنمي',        ro: 'Anime' },
+  gaming:     { en: 'Gaming',    ar: 'ألعاب',       ro: 'Jocuri' },
+  cartoons:   { en: 'Cartoons',  ar: 'كرتون',       ro: 'Desene' },
+  movies:     { en: 'Movies',    ar: 'أفلام',       ro: 'Filme' },
+  music:      { en: 'Music',     ar: 'موسيقى',      ro: 'Muzică' },
+  sports:     { en: 'Sports',    ar: 'رياضة',       ro: 'Sport' },
+  food:       { en: 'Food',      ar: 'طعام',        ro: 'Mâncare' },
+  nature:     { en: 'Nature',    ar: 'طبيعة',       ro: 'Natură' },
+  tech:       { en: 'Tech',      ar: 'تقنية',       ro: 'Tehnologie' },
+  love:       { en: 'Love',      ar: 'حب',         ro: 'Dragoste' },
+};
+
+const CAT_PRIORITY = ['trending', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
 
 function json(data, status = 200, cacheMaxAge = 60) {
   return new Response(JSON.stringify(data), {
@@ -47,27 +54,34 @@ function json(data, status = 200, cacheMaxAge = 60) {
 }
 
 async function loadFallback(request) {
-  // Try local asset first via the request URL
-  try {
-    const url = new URL(request.url);
-    const localUrl = `${url.origin}/data/fallback-gifs.json`;
-    const r = await fetch(localUrl);
-    if (r.ok) return await r.json();
-  } catch (e) {}
-  // Then try GitHub raw
-  try {
-    const r = await fetch(FALLBACK_URL, { cf: { cacheTtl: 3600 } });
-    if (r.ok) return await r.json();
-  } catch (e) {}
-  return { gifs: [], total: 0, categories: [] };
+  const url = new URL(request.url);
+  const origin = url.origin;
+  // Per-isolate cache keyed by origin
+  if (_fallbackPromise && _fallbackMeta && _fallbackMeta.origin === origin) {
+    return _fallbackPromise;
+  }
+  _fallbackMeta = { origin, fetchedAt: Date.now() };
+  _fallbackPromise = (async () => {
+    try {
+      const r = await fetch(`${origin}/data/fallback-gifs.json`, {
+        cf: { cacheTtl: 86400, cacheEverything: true },
+      });
+      if (r.ok) return await r.json();
+    } catch (e) {}
+    // Retry without cf options
+    try {
+      const r = await fetch(`${origin}/data/fallback-gifs.json`);
+      if (r.ok) return await r.json();
+    } catch (e) {}
+    return { gifs: [], total: 0, categories: [] };
+  })();
+  return _fallbackPromise;
 }
 
 function transformGiphyItem(item) {
   const id = item.id || '';
   const title = (item.title || 'GIF').trim();
-  // Extract slug from bitly or url field
   let slug = item.slug || (item.url ? item.url.replace(/^\/?gifs\//, '') : id);
-  // Strip trailing ID from slug
   slug = slug.replace(/-[A-Za-z0-9]+$/, '');
   return {
     id,
@@ -94,6 +108,42 @@ async function callGiphy(env, endpoint, params) {
   return await r.json();
 }
 
+function categoryPriority(cat) {
+  const i = CAT_PRIORITY.indexOf(cat);
+  return i === -1 ? 99 : i;
+}
+
+const CAT_KEYWORDS = (() => {
+  const map = {
+    reactions: ['laugh', 'cry', 'sad', 'happy', 'shock', 'angry', 'love', 'heart', 'wow', 'omg', 'facepalm', 'smile', 'wink', 'thumbs', 'clap', 'dance', 'wave', 'nod', 'shrug', 'sigh', 'bored', 'confused', 'scared', 'excited', 'tired', 'hungry', 'sick', 'yawn', 'lol', 'lmao', 'funny', 'haha'],
+    memes: ['meme', 'dank', 'viral', 'tiktok', 'instagram', 'twitter', 'facebook', 'youtube', 'funny', 'joke', 'comedy', 'spongebob', 'rick-roll', 'work', 'office', 'school', 'birthday', 'christmas', 'halloween', 'party'],
+    animals: ['cat', 'dog', 'puppy', 'kitten', 'horse', 'cow', 'pig', 'bird', 'fish', 'shark', 'snake', 'frog', 'rabbit', 'panda', 'bear', 'fox', 'wolf', 'lion', 'tiger', 'monkey', 'elephant', 'dino', 'duck', 'owl', 'penguin', 'hamster', 'bunny'],
+    anime: ['anime', 'manga', 'kawaii', 'senpai', 'waifu', 'mecha', 'gundam', 'pokemon', 'naruto', 'ghibli', 'pikachu'],
+    gaming: ['game', 'gaming', 'arcade', 'nintendo', 'playstation', 'xbox', 'minecraft', 'mario', 'zelda', 'sonic', 'fortnite'],
+    movies: ['movie', 'film', 'cinema', 'marvel', 'batman', 'superman', 'spiderman', 'avengers', 'star-wars', 'harry-potter', 'disney'],
+    music: ['music', 'song', 'dance', 'singing', 'guitar', 'drum', 'piano', 'concert', 'dj', 'rap', 'rock', 'metal', 'pop', 'jazz'],
+    sports: ['sport', 'football', 'soccer', 'basketball', 'baseball', 'tennis', 'hockey', 'golf', 'boxing', 'mma', 'wrestling', 'wwe', 'ufc', 'skate', 'snowboard', 'ski', 'surf', 'swim', 'cycling', 'gym', 'goal', 'slam-dunk', 'touchdown', 'nba'],
+    cartoons: ['cartoon', 'rick', 'morty', 'simpsons', 'family-guy', 'south-park', 'spongebob', 'adventure-time', 'futurama', 'avatar', 'steven-universe', 'disney'],
+    food: ['food', 'pizza', 'burger', 'taco', 'sushi', 'ramen', 'cake', 'cookie', 'donut', 'coffee', 'tea', 'beer', 'wine', 'chocolate', 'ice-cream'],
+    nature: ['nature', 'mountain', 'ocean', 'sea', 'beach', 'sunset', 'sunrise', 'rain', 'snow', 'storm', 'cloud', 'sky', 'star', 'galaxy', 'space', 'forest', 'tree', 'flower', 'waterfall', 'rainbow'],
+    tech: ['tech', 'computer', 'laptop', 'phone', 'internet', 'wifi', 'coding', 'programmer', 'ai', 'robot', 'cyber', 'hacker', 'crypto', 'bitcoin'],
+    love: ['love', 'heart', 'kiss', 'hug', 'romance', 'romantic', 'cupid', 'valentine', 'wedding', 'marriage', 'couple', 'relationship'],
+  };
+  const out = [];
+  for (const [cat, kws] of Object.entries(map)) {
+    for (const kw of kws) out.push({ kw, cat });
+  }
+  return out;
+})();
+
+function matchCategory(text) {
+  const t = (text || '').toLowerCase();
+  for (const { kw, cat } of CAT_KEYWORDS) {
+    if (t.includes(kw)) return cat;
+  }
+  return 'trending';
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -107,22 +157,30 @@ export async function onRequest(context) {
     }});
   }
 
-  // Categories endpoint — always works
+  // Categories endpoint — cached with the DB
   if (params.get('categories') === '1') {
     const fb = await loadFallback(request);
+    const counts = {};
+    for (const g of (fb.gifs || [])) {
+      counts[g.cat] = (counts[g.cat] || 0) + 1;
+    }
     const cats = CATEGORY_DEFS.map(c => ({
-      ...c,
-      count: fb.gifs ? fb.gifs.filter(g => g.cat === c.id).length : 0
+      id: c.id,
+      label_en: CAT_LABELS[c.id]?.en || c.id,
+      label_ar: CAT_LABELS[c.id]?.ar || c.id,
+      label_ro: CAT_LABELS[c.id]?.ro || c.id,
+      count: counts[c.id] || (c.id === 'trending' ? (fb.total || (fb.gifs || []).length) : 0),
     })).filter(c => c.count > 0 || c.id === 'trending');
-    return json({ ok: true, categories: cats });
+    return json({ ok: true, categories: cats, total: fb.total || (fb.gifs || []).length });
   }
 
   const limit = Math.min(parseInt(params.get('limit') || '24', 10), 50);
   const offset = parseInt(params.get('offset') || '0', 10);
-  const search = params.get('search') || '';
-  const trending = params.get('trending') === '1' || (!search && !params.get('categories'));
+  const search = (params.get('search') || '').trim();
+  const catParam = (params.get('cat') || '').trim().toLowerCase();
+  const trending = params.get('trending') === '1' || (!search && !catParam && !params.get('categories'));
 
-  // Try Giphy API first
+  // Try Giphy API first (only when key is configured)
   if (env?.GIPHY_API_KEY) {
     try {
       const result = search
@@ -132,16 +190,12 @@ export async function onRequest(context) {
           : null;
       if (result && Array.isArray(result.data) && result.data.length > 0) {
         const gifs = result.data.map(transformGiphyItem);
-        // For search results, derive category from search term by reusing CATEGORY_RULES keyword match
-        const slugLower = search.toLowerCase();
-        const cat = matchCategory(slugLower);
+        const cat = search ? matchCategory(search) : 'trending';
         gifs.forEach(g => g.cat = cat);
         return json({
-          ok: true,
-          gifs,
+          ok: true, gifs,
           total: result.pagination?.total_count || gifs.length,
-          offset,
-          source: 'giphy'
+          offset, source: 'giphy'
         }, 200, 60);
       }
     } catch (e) {
@@ -149,23 +203,40 @@ export async function onRequest(context) {
     }
   }
 
-  // Fall back to curated static database
+  // Fallback database (34.5k GIFs)
   const fb = await loadFallback(request);
-  if (!fb.gifs || fb.gifs.length === 0) {
+  let pool = fb.gifs || [];
+  if (pool.length === 0) {
     return json({ ok: false, gifs: [], total: 0, source: 'none', error: 'no_api_key_and_no_fallback' }, 200, 30);
   }
 
-  let pool = fb.gifs;
-  // Filter
-  if (search) {
-    const q = search.toLowerCase();
-    pool = pool.filter(g =>
-      g.title.toLowerCase().includes(q) ||
-      g.slug.toLowerCase().includes(q) ||
-      (g.tags || []).some(t => t.toLowerCase().includes(q))
-    );
+  if (catParam && CAT_PRIORITY.includes(catParam) && catParam !== 'trending') {
+    // Explicit category filter
+    pool = pool.filter(g => g.cat === catParam);
+  } else if (search) {
+    // If search matches a category id, treat as category browse
+    const qLower = search.toLowerCase();
+    if (CAT_PRIORITY.includes(qLower) && qLower !== 'trending') {
+      pool = pool.filter(g => g.cat === qLower);
+    } else {
+      const terms = qLower.split(/\s+/).filter(Boolean);
+      pool = pool.filter(g => {
+        const title = g.title ? g.title.toLowerCase() : '';
+        for (const t of terms) {
+          if (!title.includes(t)) return false;
+        }
+        return true;
+      });
+      // Relevance: prefix matches first
+      pool.sort((a, b) => {
+        const ap = a.title.toLowerCase().startsWith(qLower) ? 0 : 1;
+        const bp = b.title.toLowerCase().startsWith(qLower) ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return 0;
+      });
+    }
   } else if (trending) {
-    // "trending" in fallback = all sorted by category priority
+    // stable sort by category priority (already sorted in the JSON, but keep for safety)
     pool = [...pool].sort((a, b) => categoryPriority(a.cat) - categoryPriority(b.cat));
   }
 
@@ -177,38 +248,4 @@ export async function onRequest(context) {
     offset,
     source: 'fallback'
   }, 200, 60);
-}
-
-const CAT_PRIORITY = ['trending', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
-
-function categoryPriority(cat) {
-  const i = CAT_PRIORITY.indexOf(cat);
-  return i === -1 ? 99 : i;
-}
-
-const CAT_KEYWORDS = CATEGORY_DEFS.map(c => c.id).filter(c => c !== 'trending').flatMap(cat => {
-  const map = {
-    reactions: ['laugh', 'cry', 'sad', 'happy', 'shock', 'angry', 'love', 'heart', 'wow', 'omg', 'facepalm', 'smile', 'wink', 'thumbs', 'clap', 'dance', 'wave', 'nod', 'shrug', 'sigh', 'bored', 'confused', 'scared', 'excited', 'tired', 'hungry', 'sick', 'yawn', 'lol', 'lmao'],
-    animals: ['cat', 'dog', 'puppy', 'kitten', 'horse', 'cow', 'pig', 'bird', 'fish', 'shark', 'snake', 'frog', 'rabbit', 'panda', 'bear', 'fox', 'wolf', 'lion', 'tiger', 'monkey', 'elephant', 'dino', 'duck', 'owl', 'penguin'],
-    anime: ['anime', 'manga', 'kawaii', 'senpai', 'waifu', 'mecha', 'gundam', 'pokemon', 'naruto', 'ghibli'],
-    gaming: ['game', 'gaming', 'arcade', 'nintendo', 'playstation', 'xbox', 'minecraft', 'mario', 'zelda', 'sonic'],
-    movies: ['movie', 'film', 'cinema', 'marvel', 'batman', 'superman', 'spiderman', 'avengers', 'star-wars', 'harry-potter'],
-    music: ['music', 'song', 'dance', 'singing', 'guitar', 'drum', 'piano', 'concert', 'dj', 'rap', 'rock', 'metal', 'pop', 'jazz'],
-    sports: ['sport', 'football', 'soccer', 'basketball', 'baseball', 'tennis', 'hockey', 'golf', 'boxing', 'mma', 'wrestling', 'wwe', 'ufc', 'skate', 'snowboard', 'ski', 'surf', 'swim', 'cycling', 'gym', 'goal', 'slam-dunk', 'touchdown'],
-    memes: ['meme', 'dank', 'viral', 'tiktok', 'instagram', 'twitter', 'facebook', 'youtube', 'funny', 'lol', 'joke', 'comedy', 'spongebob', 'rick-roll'],
-    cartoons: ['cartoon', 'rick', 'morty', 'simpsons', 'family-guy', 'south-park', 'spongebob', 'adventure-time', 'futurama', 'avatar', 'steven-universe'],
-    food: ['food', 'pizza', 'burger', 'taco', 'sushi', 'ramen', 'cake', 'cookie', 'donut', 'coffee', 'tea', 'beer', 'wine', 'chocolate', 'ice-cream'],
-    nature: ['nature', 'mountain', 'ocean', 'sea', 'beach', 'sunset', 'sunrise', 'rain', 'snow', 'storm', 'cloud', 'sky', 'star', 'galaxy', 'space', 'forest', 'tree', 'flower', 'waterfall', 'rainbow'],
-    tech: ['tech', 'computer', 'laptop', 'phone', 'internet', 'wifi', 'coding', 'programmer', 'ai', 'robot', 'cyber', 'hacker', 'crypto', 'bitcoin'],
-    love: ['love', 'heart', 'kiss', 'hug', 'romance', 'romantic', 'cupid', 'valentine', 'wedding', 'marriage', 'couple', 'relationship'],
-  };
-  return (map[cat] || []).map(kw => ({ kw, cat }));
-});
-
-function matchCategory(text) {
-  const t = (text || '').toLowerCase();
-  for (const { kw, cat } of CAT_KEYWORDS) {
-    if (t.includes(kw)) return cat;
-  }
-  return 'trending';
 }
