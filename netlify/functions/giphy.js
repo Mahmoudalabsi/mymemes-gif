@@ -8,7 +8,7 @@ let _fallbackPromise = null;      // per-isolate cache of parsed fallback DB
 let _fallbackMeta = null;         // { origin, fetchedAt }
 
 const CATEGORY_DEFS = [
-  { id: 'trending' }, { id: 'reactions' }, { id: 'memes' }, { id: 'animals' },
+  { id: 'trending' }, { id: 'classic' }, { id: 'reactions' }, { id: 'memes' }, { id: 'animals' },
   { id: 'anime' }, { id: 'gaming' }, { id: 'cartoons' }, { id: 'movies' },
   { id: 'music' }, { id: 'sports' }, { id: 'food' }, { id: 'nature' },
   { id: 'tech' }, { id: 'love' },
@@ -16,6 +16,7 @@ const CATEGORY_DEFS = [
 
 const CAT_LABELS = {
   trending:   { en: 'Trending',  ar: 'الرائج',      ro: 'Populare' },
+  classic:    { en: 'Classic Memes', ar: 'ميمز شهيرة', ro: 'Meme-uri Celebre' },
   reactions:  { en: 'Reactions', ar: 'ردود الأفعال', ro: 'Reacții' },
   memes:      { en: 'Memes',     ar: 'ميمز',        ro: 'Meme-uri' },
   animals:    { en: 'Animals',   ar: 'حيوانات',      ro: 'Animale' },
@@ -31,7 +32,7 @@ const CAT_LABELS = {
   love:       { en: 'Love',      ar: 'حب',         ro: 'Dragoste' },
 };
 
-const CAT_PRIORITY = ['trending', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
+const CAT_PRIORITY = ['trending', 'classic', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
 
 function json(data, status = 200, cacheMaxAge = 60) {
   return {
