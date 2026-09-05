@@ -2,10 +2,11 @@ name = "mymemes-gif"
 compatibility_date = "2024-09-23"
 pages_build_output_dir = "public"
 
-# KV namespace for play counts — shared logic with MyMemes (separate namespace)
+# KV namespace for play counts — SEPARATE from MyMemes sounds site
+# (mymemes-gif-plays) so each site has its own independent counter.
 [[kv_namespaces]]
 binding = "PLAYS_KV"
-id = "0e7cac8fe1394159a70d871a624dbacd"
+id = "9c457c8eeb23434bb94d2559009aa640"
 
 # Optional Giphy API key — set via `wrangler pages secret put GIPHY_API_KEY`
 # or in the Cloudflare dashboard under Pages → mymemes-gif → Settings → Environment variables.
