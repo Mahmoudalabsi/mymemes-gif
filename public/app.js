@@ -365,7 +365,7 @@ function renderCategories() {
 
 /* ---------- Fetch GIFs ---------- */
 async function fetchGifs(opts = {}) {
-  const { offset = 0, search = '', category = 'trending' } = opts;
+  const { offset = 0, search = '', category = 'trending', sort = 'trending' } = opts;
   const params = { limit: String(PAGE_SIZE), offset: String(offset) };
   if (search) {
     params.search = search;
@@ -375,6 +375,9 @@ async function fetchGifs(opts = {}) {
   } else {
     params.trending = '1';
   }
+  // Server-side GLOBAL sort — the whole pool (25k+) is ordered before the
+  // page slice, so every appended page continues the same order.
+  if (sort && sort !== 'trending') params.sort = sort;
   const r = await fetch(giphyEndpoint(params));
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return await r.json();
@@ -585,28 +588,22 @@ function downloadGif(gif) {
 }
 
 /* ---------- Sort ---------- */
-function sortGifs(gifs) {
-  const arr = [...gifs];
-  if (state.sort === 'name') {
-    arr.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
-  } else if (state.sort === 'popular') {
-    arr.sort((a, b) => effectivePlays(b.id, b.plays) - effectivePlays(a.id, a.plays));
-  }
-  // 'trending' = original order from API
-  return arr;
-}
+// Sorting is done SERVER-SIDE over the whole library (see /api/giphy `sort`
+// param). Clicking a sort button refetches from page 0 so the user gets a
+// truly global order, not just the already-loaded subset.
 
 function initSortButtons() {
   $$('.sort-btn').forEach(btn => {
     if (btn.getAttribute('data-sort') === state.sort) btn.classList.add('active');
     btn.addEventListener('click', () => {
+      const next = btn.getAttribute('data-sort');
+      if (next === state.sort) return;
       $$('.sort-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      state.sort = btn.getAttribute('data-sort');
+      state.sort = next;
       try { localStorage.setItem(LS_KEY_LASTSORT, state.sort); } catch (e) {}
-      // Re-sort existing GIFs without refetching
-      state.gifs = sortGifs(state.gifs);
-      renderGifs(true);
+      // Refetch from page 0 with the sort param — global server-side order
+      resetAndLoad();
     });
   });
 }
@@ -683,9 +680,8 @@ async function loadNextPage() {
   if (state.loading || state.allGifsLoaded) return;
   state.loading = true;
   $('#loading-more').hidden = false;
-  let orderChanged = false;
   try {
-    const data = await fetchGifs({ offset: state.offset, search: state.search, category: state.category });
+    const data = await fetchGifs({ offset: state.offset, search: state.search, category: state.category, sort: state.sort });
     if (!data || !data.ok) {
       state.allGifsLoaded = true;
     } else {
@@ -701,19 +697,15 @@ async function loadNextPage() {
         // Advance by what the server actually returned — advancing by fresh.length
         // would re-fetch overlapping windows and stall near the tail.
         state.offset += newGifs.length;
-        if (state.sort !== 'trending') {
-          // keep the active sort applied across appended pages — the array is
-          // re-sorted GLOBALLY, so the DOM must be rebuilt (not incrementally
-          // appended) to reflect the new order.
-          state.gifs = sortGifs(state.gifs);
-          orderChanged = true;
-        }
+        // No client-side re-sort needed: with &sort= the server orders the
+        // WHOLE pool before slicing, so appended pages arrive already in
+        // global order — incremental append just works.
         if (newGifs.length < PAGE_SIZE || state.offset >= state.total) {
           state.allGifsLoaded = true;
         }
       }
     }
-    renderGifs(orderChanged);
+    renderGifs(false);
   } catch (e) {
     console.error('loadNextPage error:', e);
     state.allGifsLoaded = true;

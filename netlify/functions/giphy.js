@@ -103,9 +103,10 @@ function expandRecord(r) {
   };
 }
 
-// Search text per compact record (no allocation: slug for tenor, title for giphy)
+// Search text per record — supports BOTH storage formats (compact v3 and
+// legacy full). See functions/api/giphy.js for the regression note.
 function searchText(r) {
-  return r.s === 't' ? (r.l || '') : (r.t || '');
+  return r.t || r.title || r.l || '';
 }
 
 function recCat(r) {
@@ -114,6 +115,75 @@ function recCat(r) {
 
 function recTitle(r) {
   return r.t || r.title || '';
+}
+
+/* ---------- Server-side global sort ---------- */
+
+function recId(r) {
+  return String(r.i || r.id || '');
+}
+
+// Human-readable name for sorting (title, else slug words, else id)
+function recNameText(r) {
+  const t = recTitle(r);
+  if (t) return t;
+  if (r.l) return String(r.l).replace(/[-_.]+/g, ' ');
+  return recId(r);
+}
+
+// Memoized name-sort of the FULL pool (see functions/api/giphy.js)
+let _nameSortedSrc = null;
+let _nameSortedPool = null;
+function nameSorted(pool) {
+  if (_nameSortedSrc === pool && _nameSortedPool) return _nameSortedPool;
+  const arr = pool.slice().sort((a, b) => {
+    const an = recNameText(a).toLowerCase();
+    const bn = recNameText(b).toLowerCase();
+    if (an !== bn) return an < bn ? -1 : 1;
+    return recId(a) < recId(b) ? -1 : 1;
+  });
+  _nameSortedSrc = pool;
+  _nameSortedPool = arr;
+  return arr;
+}
+
+// Play counts from Netlify Blobs (same "play-counts" store the plays mirror
+// writes to) — 60s cache; degrades to static plays if blobs unavailable.
+let _blobStore = null;
+let _blobStoreTried = false;
+async function getBlobStore() {
+  if (_blobStoreTried) return _blobStore;
+  _blobStoreTried = true;
+  try {
+    const { getStore } = await import('@netlify/blobs');
+    _blobStore = getStore({ name: 'play-counts', consistency: 'strong' });
+  } catch (e) { _blobStore = null; }
+  return _blobStore;
+}
+
+let _playsCache = { at: 0, counts: null };
+async function loadPlays() {
+  const now = Date.now();
+  if (_playsCache.counts && now - _playsCache.at < 60000) return _playsCache.counts;
+  try {
+    const store = await getBlobStore();
+    if (store) {
+      const counts = (await store.get('counts', { type: 'json' })) || {};
+      _playsCache = { at: now, counts };
+      return counts;
+    }
+  } catch (e) { /* fall through */ }
+  return _playsCache.counts || {};
+}
+
+// Popular = static DB plays + live counts. Stable sort: ties keep the
+// build-time trending order.
+function popularSorted(pool, counts) {
+  return pool.slice().sort((a, b) => {
+    const pa = (a.p || 0) + (counts[recId(a)] || 0);
+    const pb = (b.p || 0) + (counts[recId(b)] || 0);
+    return pb - pa;
+  });
 }
 
 /* ---------- Live Giphy API (optional key) ---------- */
@@ -232,6 +302,7 @@ export async function handler(event) {
   const offset = parseInt(params.get('offset') || '0', 10);
   const search = (params.get('search') || '').trim();
   const catParam = (params.get('cat') || '').trim().toLowerCase();
+  const sortParam = (params.get('sort') || '').trim().toLowerCase();
   const trending = params.get('trending') === '1' || (!search && !catParam && !params.get('categories'));
 
   // Try Giphy API first (only when key is configured)
@@ -246,10 +317,24 @@ export async function handler(event) {
         const gifs = result.data.map(transformGiphyItem);
         const cat = search ? matchCategory(search) : 'trending';
         gifs.forEach(g => g.cat = cat);
+        // Live API has no global sort — apply to the returned page slice
+        if (sortParam === 'name' || sortParam === 'popular') {
+          const counts = sortParam === 'popular' ? await loadPlays() : null;
+          gifs.sort((a, b) => {
+            if (sortParam === 'name') {
+              const an = (a.title || '').toLowerCase();
+              const bn = (b.title || '').toLowerCase();
+              return an < bn ? -1 : an > bn ? 1 : (a.id < b.id ? -1 : 1);
+            }
+            const pa = (a.plays || 0) + (counts[a.id] || 0);
+            const pb = (b.plays || 0) + (counts[b.id] || 0);
+            return pb - pa; // stable
+          });
+        }
         return json({
           ok: true, gifs,
           total: result.pagination?.total_count || gifs.length,
-          offset, source: 'giphy'
+          offset, sort: sortParam || 'trending', source: 'giphy'
         }, 200, 60);
       }
     } catch (e) {
@@ -292,7 +377,17 @@ export async function handler(event) {
       });
     }
   }
-  // trending: JSON is pre-sorted at build time — pure slice, no sort cost
+  // trending: JSON is pre-sorted at build time — pure slice, no sort cost.
+  // name/popular: sort the WHOLE pool server-side so pagination stays ordered.
+  let cacheAge = 60;
+  if (sortParam === 'name') {
+    pool = nameSorted(pool);
+    cacheAge = 300;
+  } else if (sortParam === 'popular') {
+    const counts = await loadPlays();
+    pool = popularSorted(pool, counts);
+    cacheAge = 30;
+  }
 
   const slice = pool.slice(offset, offset + limit).map(expandRecord);
   return json({
@@ -300,6 +395,7 @@ export async function handler(event) {
     gifs: slice,
     total: pool.length,
     offset,
+    sort: sortParam === 'name' || sortParam === 'popular' ? sortParam : 'trending',
     source: 'fallback'
-  }, 200, 60);
+  }, 200, cacheAge);
 }
