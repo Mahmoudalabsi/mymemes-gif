@@ -253,6 +253,9 @@ function registerPlay(gif) {
     card.classList.add('playing');
     setTimeout(() => card.classList.remove('playing'), 2500);
   }
+  // Refresh hero/footer totals so the global counter visibly increments
+  // the moment a visitor (or someone they shared a link with) plays a GIF.
+  renderHeroTotals();
 }
 
 /* ---------- Per-GIF download counter ---------- */
@@ -281,6 +284,9 @@ function registerDownload(gif) {
   });
   const lbDl = document.querySelector('.lightbox-downloads-count');
   if (lbDl) lbDl.textContent = formatNumber(next);
+  // Refresh hero/footer totals so the global counter visibly increments
+  // on every download.
+  renderHeroTotals();
 }
 
 function formatNumber(n) {
@@ -291,6 +297,51 @@ function formatNumber(n) {
 }
 
 /* ---------- Global plays sync ---------- */
+// The hero/footer total counters combine:
+//   1. A synthetic "baseline" derived from the GIF catalog size — gives the
+//      site a non-zero starting point that scales with the library and
+//      visibly grows every time we add new GIFs (so the number isn't stuck
+//      at 0 while the site has no traffic yet).
+//   2. The live KV counts (real plays from all visitors).
+//   3. The current visitor's local plays not yet in KV.
+// Result: the number always reflects library size + real activity, and
+// every shared link that gets opened pushes it visibly higher.
+function baselinePlays() {
+  const total = state.total || 0;
+  // ~5 baseline plays per GIF, rounded to nearest 100 for a clean look
+  return Math.floor((total * 5) / 100) * 100;
+}
+function baselineDownloads() {
+  const total = state.total || 0;
+  // ~1 baseline download per 3 GIFs, rounded to nearest 50
+  return Math.floor((total / 3) / 50) * 50;
+}
+function localPlaysTotal() {
+  let n = 0;
+  for (const k in state.localPlays) n += state.localPlays[k] || 0;
+  return n;
+}
+function localDownloadsTotal() {
+  let n = 0;
+  for (const k in state.localDownloads) n += state.localDownloads[k] || 0;
+  return n;
+}
+function renderHeroTotals() {
+  const playsTotal = baselinePlays()
+    + Object.values(state.globalPlays || {}).reduce((a, b) => a + (b || 0), 0)
+    + localPlaysTotal();
+  const dlTotal = baselineDownloads()
+    + Object.values(state.globalDownloads || {}).reduce((a, b) => a + (b || 0), 0)
+    + localDownloadsTotal();
+  const fp = $('#footer-plays');
+  if (fp) fp.textContent = formatNumber(playsTotal);
+  const hp = $('#stat-plays');
+  if (hp) hp.textContent = formatNumber(playsTotal);
+  const fd = $('#footer-downloads');
+  if (fd) fd.textContent = formatNumber(dlTotal);
+  const hd = $('#stat-downloads');
+  if (hd) hd.textContent = formatNumber(dlTotal);
+}
 async function syncGlobalPlays() {
   try {
     const r = await fetch(playsEndpoint(), { method: 'GET' });
@@ -298,14 +349,8 @@ async function syncGlobalPlays() {
     const data = await r.json();
     if (data && data.counts) {
       state.globalPlays = data.counts;
-      let total = 0;
-      for (const k of Object.keys(data.counts)) total += data.counts[k];
-      const footer = $('#footer-plays');
-      if (footer) footer.textContent = formatNumber(total);
-      const heroStat = $('#stat-plays');
-      if (heroStat) heroStat.textContent = formatNumber(total);
+      renderHeroTotals();
       // Refresh visible card counters so the new global value shows up
-      // (matches the behavior of syncGlobalDownloads)
       document.querySelectorAll('.gif-card').forEach(card => {
         const id = card.getAttribute('data-id');
         const el = card.querySelector('.gif-card-plays-count');
@@ -326,12 +371,7 @@ async function syncGlobalDownloads() {
     const data = await r.json();
     if (data && data.counts) {
       state.globalDownloads = data.counts;
-      let total = 0;
-      for (const k of Object.keys(data.counts)) total += data.counts[k];
-      const footer = $('#footer-downloads');
-      if (footer) footer.textContent = formatNumber(total);
-      const heroStat = $('#stat-downloads');
-      if (heroStat) heroStat.textContent = formatNumber(total);
+      renderHeroTotals();
       // Refresh visible card counters so the new global value shows up
       document.querySelectorAll('.gif-card').forEach(card => {
         const id = card.getAttribute('data-id');
@@ -928,6 +968,11 @@ async function init() {
     const visibleCats = (state.categories || []).filter(c => c.id !== 'trending').length;
     statCats.textContent = formatNumber(visibleCats);
   }
+  // Render hero/footer totals immediately using the baseline (derived from
+  // state.total). This shows a non-zero number before KV sync completes,
+  // and the number scales with the GIF library size so it visibly grows
+  // every time we add new GIFs.
+  renderHeroTotals();
   // Sync global plays + downloads before first render so counts are accurate
   await Promise.all([syncGlobalPlays(), syncGlobalDownloads()]);
   // Periodic sync every 30s
