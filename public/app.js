@@ -242,12 +242,13 @@ function registerPlay(gif) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slug: id })
   }).catch(() => {});
-  // Update UI immediately
+  // Update UI immediately. effectivePlays() already reflects the incremented
+  // local count, so no +1 on top — that would double-count.
   const card = document.querySelector(`.gif-card[data-id="${id}"]`);
   if (card) {
     const playsEl = card.querySelector('.gif-card-plays-count');
     if (playsEl) {
-      playsEl.textContent = formatNumber(effectivePlays(id, gif.plays) + 1);
+      playsEl.textContent = formatNumber(effectivePlays(id, gif.plays));
     }
     card.classList.add('playing');
     setTimeout(() => card.classList.remove('playing'), 2500);
@@ -271,8 +272,10 @@ function registerDownload(gif) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slug: id })
   }).catch(() => {});
-  // Update UI immediately on the card and in the lightbox if open
-  const next = effectiveDownloads(id) + 1;
+  // Update UI immediately on the card and in the lightbox if open.
+  // effectiveDownloads() already reflects the incremented local count, so no
+  // +1 on top — that would double-count.
+  const next = effectiveDownloads(id);
   document.querySelectorAll(`.gif-card[data-id="${id}"] .gif-card-downloads-count`).forEach(el => {
     el.textContent = formatNumber(next);
   });
@@ -301,6 +304,16 @@ async function syncGlobalPlays() {
       if (footer) footer.textContent = formatNumber(total);
       const heroStat = $('#stat-plays');
       if (heroStat) heroStat.textContent = formatNumber(total);
+      // Refresh visible card counters so the new global value shows up
+      // (matches the behavior of syncGlobalDownloads)
+      document.querySelectorAll('.gif-card').forEach(card => {
+        const id = card.getAttribute('data-id');
+        const el = card.querySelector('.gif-card-plays-count');
+        if (el) {
+          const basePlays = parseInt(card.getAttribute('data-base-plays') || '0', 10);
+          el.textContent = formatNumber(effectivePlays(id, basePlays));
+        }
+      });
     }
   } catch (e) {}
 }
@@ -475,6 +488,7 @@ function renderGifCard(gif) {
   card.className = 'sound-card gif-card';
   card.setAttribute('data-id', gif.id);
   card.setAttribute('data-cat', gif.cat || 'trending');
+  card.setAttribute('data-base-plays', String(gif.plays || 0));
 
   const plays = effectivePlays(gif.id, gif.plays);
   const downloads = effectiveDownloads(gif.id);
