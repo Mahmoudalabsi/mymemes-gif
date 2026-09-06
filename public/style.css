@@ -74,6 +74,9 @@ html[dir="rtl"] {
 
 html {
   scroll-behavior: smooth;
+  /* Kill Android/Chrome font-boosting: prevents UNEVEN text inflation between cards */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 html, body {
