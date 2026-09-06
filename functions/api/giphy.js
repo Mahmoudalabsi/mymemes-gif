@@ -189,6 +189,23 @@ async function loadPlays(env) {
   }
 }
 
+// Global download counts (KV "download-counts" map, keyed by gif id) — 60s isolate cache.
+// Separate from play counts so the two counters stay independent.
+let _downloadsCache = { at: 0, counts: null };
+async function loadDownloads(env) {
+  const kv = env && env.PLAYS_KV;
+  if (!kv) return {};
+  const now = Date.now();
+  if (_downloadsCache.counts && now - _downloadsCache.at < 60000) return _downloadsCache.counts;
+  try {
+    const counts = (await kv.get('download-counts', 'json')) || {};
+    _downloadsCache = { at: now, counts };
+    return counts;
+  } catch (e) {
+    return _downloadsCache.counts || {};
+  }
+}
+
 // Popular = static DB plays + live KV counts. Stable sort: ties keep the
 // build-time trending order (no arbitrary id shuffle when counts are equal).
 function popularSorted(pool, counts) {
@@ -196,6 +213,35 @@ function popularSorted(pool, counts) {
     const pa = (a.p || 0) + (counts[recId(a)] || 0);
     const pb = (b.p || 0) + (counts[recId(b)] || 0);
     return pb - pa;
+  });
+}
+
+// Memoized new-sort of the FULL pool — sorts by added_at DESC (newest batch
+// first), then by reverse insertion order within the same batch. Stable.
+let _newSortedSrc = null;
+let _newSortedPool = null;
+function newSorted(pool) {
+  if (_newSortedSrc === pool && _newSortedPool) return _newSortedPool;
+  // Build a position index so ties resolve in reverse-insertion order
+  const pos = new Map();
+  for (let i = 0; i < pool.length; i++) pos.set(pool[i], i);
+  const arr = pool.slice().sort((a, b) => {
+    const aa = a.added_at || 1;
+    const bb = b.added_at || 1;
+    if (aa !== bb) return bb - aa;          // higher added_at = newer = first
+    return pos.get(b) - pos.get(a);          // within same batch, later in array = first
+  });
+  _newSortedSrc = pool;
+  _newSortedPool = arr;
+  return arr;
+}
+
+// Downloads sort — uses live KV download-counts. Stable: ties keep pool order.
+function downloadsSorted(pool, counts) {
+  return pool.slice().sort((a, b) => {
+    const da = counts[recId(a)] || 0;
+    const db = counts[recId(b)] || 0;
+    return db - da;
   });
 }
 
@@ -386,8 +432,9 @@ export async function onRequest(context) {
     }
   }
   // trending: JSON is pre-sorted at build time — pure slice, no sort cost.
-  // name/popular: sort the WHOLE pool server-side so every pagination window
-  // stays globally ordered (client just appends pages in arrival order).
+  // name/popular/new/downloads: sort the WHOLE pool server-side so every
+  // pagination window stays globally ordered (client just appends pages in
+  // arrival order).
   let cacheAge = 60;
   if (sortParam === 'name') {
     pool = nameSorted(pool);
@@ -395,6 +442,13 @@ export async function onRequest(context) {
   } else if (sortParam === 'popular') {
     const counts = await loadPlays(env);
     pool = popularSorted(pool, counts);
+    cacheAge = 30; // counts evolve — keep short
+  } else if (sortParam === 'new') {
+    pool = newSorted(pool);
+    cacheAge = 300; // added_at is static — safe to cache longer
+  } else if (sortParam === 'downloads') {
+    const dlCounts = await loadDownloads(env);
+    pool = downloadsSorted(pool, dlCounts);
     cacheAge = 30; // counts evolve — keep short
   }
 
@@ -404,7 +458,7 @@ export async function onRequest(context) {
     gifs: slice,
     total: pool.length,
     offset,
-    sort: sortParam === 'name' || sortParam === 'popular' ? sortParam : 'trending',
+    sort: ['name','popular','new','downloads'].includes(sortParam) ? sortParam : 'trending',
     source: 'fallback'
   }, 200, cacheAge);
 }

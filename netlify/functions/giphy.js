@@ -177,6 +177,31 @@ async function loadPlays() {
   return _playsCache.counts || {};
 }
 
+// Downloads blob store (separate from play-counts) — 60s isolate cache.
+let _dlBlobStore = null;
+async function getDlBlobStore() {
+  if (_dlBlobStore) return _dlBlobStore;
+  try {
+    _dlBlobStore = getStore({ name: 'download-counts', consistency: 'strong' });
+  } catch (e) { _dlBlobStore = null; }
+  return _dlBlobStore;
+}
+
+let _downloadsCache = { at: 0, counts: null };
+async function loadDownloads() {
+  const now = Date.now();
+  if (_downloadsCache.counts && now - _downloadsCache.at < 60000) return _downloadsCache.counts;
+  try {
+    const store = await getDlBlobStore();
+    if (store) {
+      const counts = (await store.get('counts', { type: 'json' })) || {};
+      _downloadsCache = { at: now, counts };
+      return counts;
+    }
+  } catch (e) { /* fall through */ }
+  return _downloadsCache.counts || {};
+}
+
 // Popular = static DB plays + live counts. Stable sort: ties keep the
 // build-time trending order.
 function popularSorted(pool, counts) {
@@ -184,6 +209,33 @@ function popularSorted(pool, counts) {
     const pa = (a.p || 0) + (counts[recId(a)] || 0);
     const pb = (b.p || 0) + (counts[recId(b)] || 0);
     return pb - pa;
+  });
+}
+
+// Memoized new-sort — added_at DESC, then reverse insertion order within batch.
+let _newSortedSrc = null;
+let _newSortedPool = null;
+function newSorted(pool) {
+  if (_newSortedSrc === pool && _newSortedPool) return _newSortedPool;
+  const pos = new Map();
+  for (let i = 0; i < pool.length; i++) pos.set(pool[i], i);
+  const arr = pool.slice().sort((a, b) => {
+    const aa = a.added_at || 1;
+    const bb = b.added_at || 1;
+    if (aa !== bb) return bb - aa;
+    return pos.get(b) - pos.get(a);
+  });
+  _newSortedSrc = pool;
+  _newSortedPool = arr;
+  return arr;
+}
+
+// Downloads sort — uses live download counts. Stable: ties keep pool order.
+function downloadsSorted(pool, counts) {
+  return pool.slice().sort((a, b) => {
+    const da = counts[recId(a)] || 0;
+    const db = counts[recId(b)] || 0;
+    return db - da;
   });
 }
 
@@ -379,7 +431,7 @@ export async function handler(event) {
     }
   }
   // trending: JSON is pre-sorted at build time — pure slice, no sort cost.
-  // name/popular: sort the WHOLE pool server-side so pagination stays ordered.
+  // name/popular/new/downloads: sort the WHOLE pool server-side so pagination stays ordered.
   let cacheAge = 60;
   if (sortParam === 'name') {
     pool = nameSorted(pool);
@@ -387,6 +439,13 @@ export async function handler(event) {
   } else if (sortParam === 'popular') {
     const counts = await loadPlays();
     pool = popularSorted(pool, counts);
+    cacheAge = 30;
+  } else if (sortParam === 'new') {
+    pool = newSorted(pool);
+    cacheAge = 300;
+  } else if (sortParam === 'downloads') {
+    const dlCounts = await loadDownloads();
+    pool = downloadsSorted(pool, dlCounts);
     cacheAge = 30;
   }
 
@@ -396,7 +455,7 @@ export async function handler(event) {
     gifs: slice,
     total: pool.length,
     offset,
-    sort: sortParam === 'name' || sortParam === 'popular' ? sortParam : 'trending',
+    sort: ['name','popular','new','downloads'].includes(sortParam) ? sortParam : 'trending',
     source: 'fallback'
   }, 200, cacheAge);
 }

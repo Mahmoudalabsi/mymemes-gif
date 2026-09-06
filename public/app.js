@@ -39,6 +39,8 @@ const I18N = {
     sortTrending: 'Trending',
     sortPopular: 'Popular',
     sortName: 'Name',
+    sortNew: 'Newest',
+    sortDownloads: 'Most Downloaded',
     noGifs: 'No GIFs found',
     emptySearch: 'Try a different keyword.',
     emptyCategory: 'No GIFs in this category yet.',
@@ -78,6 +80,8 @@ const I18N = {
     sortTrending: 'الرائج',
     sortPopular: 'الأكثر مشاهدة',
     sortName: 'الاسم',
+    sortNew: 'الأحدث',
+    sortDownloads: 'الأكثر تنزيلاً',
     noGifs: 'لا توجد صور متحركة',
     emptySearch: 'جرّب كلمة بحث أخرى.',
     emptyCategory: 'لا توجد صور في هذا القسم بعد.',
@@ -117,6 +121,8 @@ const I18N = {
     sortTrending: 'Populare',
     sortPopular: 'Top',
     sortName: 'Nume',
+    sortNew: 'Cele mai noi',
+    sortDownloads: 'Cele mai descărcate',
     noGifs: 'Niciun GIF găsit',
     emptySearch: 'Încearcă alt cuvânt cheie.',
     emptyCategory: 'Niciun GIF în această categorie.',
@@ -902,6 +908,12 @@ async function init() {
   await detectPlatform();
   state.categories = await fetchCategories();
   renderCategories();
+  // Update hero #stat-categories count (visible categories, excluding 'trending')
+  const statCats = $('#stat-categories');
+  if (statCats) {
+    const visibleCats = (state.categories || []).filter(c => c.id !== 'trending').length;
+    statCats.textContent = formatNumber(visibleCats);
+  }
   // Sync global plays + downloads before first render so counts are accurate
   await Promise.all([syncGlobalPlays(), syncGlobalDownloads()]);
   // Periodic sync every 30s
