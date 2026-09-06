@@ -94,6 +94,21 @@ function titleFromSlug(slug) {
 }
 
 function expandRecord(r) {
+  // v4 compact format: { i, t, c, u, h, p?, pl?, s, a }
+  if (r.u) {
+    return {
+      id: r.i,
+      title: r.t || r.i,
+      cat: r.c || 'trending',
+      url: r.u,
+      thumb: r.h || r.u,
+      preview: r.p || r.h || r.u,
+      plays: r.pl || 0,
+      source: r.s || '',
+      added_at: r.a || 1,
+      tags: [],
+    };
+  }
   // Legacy full-record passthrough (v2 format)
   if (r.url) return r;
   if (r.s === 't') {
@@ -210,8 +225,8 @@ async function loadDownloads(env) {
 // build-time trending order (no arbitrary id shuffle when counts are equal).
 function popularSorted(pool, counts) {
   return pool.slice().sort((a, b) => {
-    const pa = (a.p || 0) + (counts[recId(a)] || 0);
-    const pb = (b.p || 0) + (counts[recId(b)] || 0);
+    const pa = (a.pl || a.p || a.plays || 0) + (counts[recId(a)] || 0);
+    const pb = (b.pl || b.p || b.plays || 0) + (counts[recId(b)] || 0);
     return pb - pa;
   });
 }
@@ -226,8 +241,8 @@ function newSorted(pool) {
   const pos = new Map();
   for (let i = 0; i < pool.length; i++) pos.set(pool[i], i);
   const arr = pool.slice().sort((a, b) => {
-    const aa = a.added_at || 1;
-    const bb = b.added_at || 1;
+    const aa = a.a || a.added_at || 1;
+    const bb = b.a || b.added_at || 1;
     if (aa !== bb) return bb - aa;          // higher added_at = newer = first
     return pos.get(b) - pos.get(a);          // within same batch, later in array = first
   });
@@ -376,12 +391,12 @@ export async function onRequest(context) {
           const counts = sortParam === 'popular' ? await loadPlays(env) : null;
           gifs.sort((a, b) => {
             if (sortParam === 'name') {
-              const an = (a.title || '').toLowerCase();
-              const bn = (b.title || '').toLowerCase();
-              return an < bn ? -1 : an > bn ? 1 : (a.id < b.id ? -1 : 1);
+              const an = (a.title || a.t || '').toLowerCase();
+              const bn = (b.title || b.t || '').toLowerCase();
+              return an < bn ? -1 : an > bn ? 1 : ((a.id||a.i) < (b.id||b.i) ? -1 : 1);
             }
-            const pa = (a.plays || 0) + (counts[a.id] || 0);
-            const pb = (b.plays || 0) + (counts[b.id] || 0);
+            const pa = (a.plays || a.pl || a.p || 0) + (counts[a.id || a.i] || 0);
+            const pb = (b.plays || b.pl || b.p || 0) + (counts[b.id || b.i] || 0);
             return pb - pa; // stable
           });
         }

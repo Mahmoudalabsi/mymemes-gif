@@ -1,7 +1,20 @@
 /**
- * Netlify Function — Giphy proxy mirror (v3: compact big database).
- * Same logic as functions/api/giphy.js with Netlify handler signature.
- * Compact records expanded on serve; JSON pre-sorted at build time.
+ * Cloudflare Pages Function — Giphy Proxy (v3: compact big database)
+ * ==================================================================
+ * Serves GIFs from Giphy API when env.GIPHY_API_KEY is set,
+ * otherwise from the aggregated fallback database (compact format v3).
+ *
+ * Compact record: { s:'g'|'t', i:<id>, l:<tenor-slug>, t:<title>, c:<cat>, p:<plays> }
+ * Records are expanded to full shape only for the returned page slice.
+ * The JSON is pre-sorted at build time — trending requests are pure slices.
+ *
+ * Endpoints:
+ *   GET /api/giphy?trending=1&offset=0&limit=24
+ *   GET /api/giphy?search=QUERY&offset=0&limit=24
+ *   GET /api/giphy?cat=animals&offset=0&limit=24
+ *   GET /api/giphy?categories=1
+ *   Optional: &sort=name | &sort=popular  (applied to the WHOLE pool
+ *   server-side, so pagination windows stay globally ordered)
  */
 
 let _fallbackPromise = null;      // per-isolate cache of parsed fallback DB
@@ -35,8 +48,8 @@ const CAT_LABELS = {
 const CAT_PRIORITY = ['trending', 'classic', 'reactions', 'memes', 'animals', 'anime', 'gaming', 'cartoons', 'movies', 'music', 'sports', 'food', 'nature', 'tech', 'love'];
 
 function json(data, status = 200, cacheMaxAge = 60) {
-  return {
-    statusCode: status,
+  return new Response(JSON.stringify(data), {
+    status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'access-control-allow-origin': '*',
@@ -44,21 +57,27 @@ function json(data, status = 200, cacheMaxAge = 60) {
       'access-control-allow-headers': 'Content-Type',
       'cache-control': `public, max-age=${cacheMaxAge}, s-maxage=${cacheMaxAge * 6}`,
     },
-    body: JSON.stringify(data),
-  };
+  });
 }
 
-const FALLBACK_URL = 'https://raw.githubusercontent.com/Mahmoudalabsi/mymemes-gif/main/public/data/fallback-gifs.json';
-
-async function loadFallback() {
-  if (_fallbackPromise) return _fallbackPromise;
+async function loadFallback(request) {
+  const url = new URL(request.url);
+  const origin = url.origin;
+  // Per-isolate cache keyed by origin
+  if (_fallbackPromise && _fallbackMeta && _fallbackMeta.origin === origin) {
+    return _fallbackPromise;
+  }
+  _fallbackMeta = { origin, fetchedAt: Date.now() };
   _fallbackPromise = (async () => {
     try {
-      const r = await fetch(`${FALLBACK_URL}?t=${Date.now()}`);
+      const r = await fetch(`${origin}/data/fallback-gifs.json?v=3`, {
+        cf: { cacheTtl: 86400, cacheEverything: true },
+      });
       if (r.ok) return await r.json();
     } catch (e) {}
+    // Retry without cf options
     try {
-      const r = await fetch('/data/fallback-gifs.json');
+      const r = await fetch(`${origin}/data/fallback-gifs.json?v=3`);
       if (r.ok) return await r.json();
     } catch (e) {}
     return { gifs: [], total: 0, categories: [] };
@@ -75,6 +94,21 @@ function titleFromSlug(slug) {
 }
 
 function expandRecord(r) {
+  // v4 compact format: { i, t, c, u, h, p?, pl?, s, a }
+  if (r.u) {
+    return {
+      id: r.i,
+      title: r.t || r.i,
+      cat: r.c || 'trending',
+      url: r.u,
+      thumb: r.h || r.u,
+      preview: r.p || r.h || r.u,
+      plays: r.pl || 0,
+      source: r.s || '',
+      added_at: r.a || 1,
+      tags: [],
+    };
+  }
   // Legacy full-record passthrough (v2 format)
   if (r.url) return r;
   if (r.s === 't') {
@@ -104,8 +138,11 @@ function expandRecord(r) {
   };
 }
 
-// Search text per record — supports BOTH storage formats (compact v3 and
-// legacy full). See functions/api/giphy.js for the regression note.
+// Search text per record — supports BOTH storage formats:
+//   compact v3: { s:'g'|'t', i, l:<tenor-slug>, t:<title> }
+//   legacy full: { id, title, url, ... }
+// (The deployed fallback-gifs.json is legacy full-format, so the compact-only
+//  lookup here used to return '' for every record — search matched nothing.)
 function searchText(r) {
   return r.t || r.title || r.l || '';
 }
@@ -132,7 +169,9 @@ function recNameText(r) {
   return recId(r);
 }
 
-// Memoized name-sort of the FULL pool (see functions/api/giphy.js)
+// Memoized name-sort of the FULL pool (the common unfiltered path) — sorting
+// 25k+ records on every request would waste CPU; filtered pools (category /
+// search) are small enough to sort per request.
 let _nameSortedSrc = null;
 let _nameSortedPool = null;
 function nameSorted(pool) {
@@ -141,96 +180,78 @@ function nameSorted(pool) {
     const an = recNameText(a).toLowerCase();
     const bn = recNameText(b).toLowerCase();
     if (an !== bn) return an < bn ? -1 : 1;
-    return recId(a) < recId(b) ? -1 : 1;
+    return recId(a) < recId(b) ? -1 : 1; // deterministic pagination
   });
   _nameSortedSrc = pool;
   _nameSortedPool = arr;
   return arr;
 }
 
-// Play counts from Netlify Blobs (same "play-counts" store the plays mirror
-// writes to) — 60s cache; degrades to static plays if blobs unavailable.
-let _blobStore = null;
-let _blobStoreTried = false;
-async function getBlobStore() {
-  if (_blobStoreTried) return _blobStore;
-  _blobStoreTried = true;
-  try {
-    const { getStore } = await import('@netlify/blobs');
-    _blobStore = getStore({ name: 'play-counts', consistency: 'strong' });
-  } catch (e) { _blobStore = null; }
-  return _blobStore;
-}
-
+// Global play counts (KV "counts" map, keyed by gif id) — 60s isolate cache.
+// One KV read per minute per isolate instead of one per request.
 let _playsCache = { at: 0, counts: null };
-async function loadPlays() {
+async function loadPlays(env) {
+  const kv = env && env.PLAYS_KV;
+  if (!kv) return {};
   const now = Date.now();
   if (_playsCache.counts && now - _playsCache.at < 60000) return _playsCache.counts;
   try {
-    const store = await getBlobStore();
-    if (store) {
-      const counts = (await store.get('counts', { type: 'json' })) || {};
-      _playsCache = { at: now, counts };
-      return counts;
-    }
-  } catch (e) { /* fall through */ }
-  return _playsCache.counts || {};
+    const counts = (await kv.get('counts', 'json')) || {};
+    _playsCache = { at: now, counts };
+    return counts;
+  } catch (e) {
+    return _playsCache.counts || {};
+  }
 }
 
-// Downloads blob store (separate from play-counts) — 60s isolate cache.
-let _dlBlobStore = null;
-async function getDlBlobStore() {
-  if (_dlBlobStore) return _dlBlobStore;
-  try {
-    _dlBlobStore = getStore({ name: 'download-counts', consistency: 'strong' });
-  } catch (e) { _dlBlobStore = null; }
-  return _dlBlobStore;
-}
-
+// Global download counts (KV "download-counts" map, keyed by gif id) — 60s isolate cache.
+// Separate from play counts so the two counters stay independent.
 let _downloadsCache = { at: 0, counts: null };
-async function loadDownloads() {
+async function loadDownloads(env) {
+  const kv = env && env.PLAYS_KV;
+  if (!kv) return {};
   const now = Date.now();
   if (_downloadsCache.counts && now - _downloadsCache.at < 60000) return _downloadsCache.counts;
   try {
-    const store = await getDlBlobStore();
-    if (store) {
-      const counts = (await store.get('counts', { type: 'json' })) || {};
-      _downloadsCache = { at: now, counts };
-      return counts;
-    }
-  } catch (e) { /* fall through */ }
-  return _downloadsCache.counts || {};
+    const counts = (await kv.get('download-counts', 'json')) || {};
+    _downloadsCache = { at: now, counts };
+    return counts;
+  } catch (e) {
+    return _downloadsCache.counts || {};
+  }
 }
 
-// Popular = static DB plays + live counts. Stable sort: ties keep the
-// build-time trending order.
+// Popular = static DB plays + live KV counts. Stable sort: ties keep the
+// build-time trending order (no arbitrary id shuffle when counts are equal).
 function popularSorted(pool, counts) {
   return pool.slice().sort((a, b) => {
-    const pa = (a.p || 0) + (counts[recId(a)] || 0);
-    const pb = (b.p || 0) + (counts[recId(b)] || 0);
+    const pa = (a.pl || a.p || a.plays || 0) + (counts[recId(a)] || 0);
+    const pb = (b.pl || b.p || b.plays || 0) + (counts[recId(b)] || 0);
     return pb - pa;
   });
 }
 
-// Memoized new-sort — added_at DESC, then reverse insertion order within batch.
+// Memoized new-sort of the FULL pool — sorts by added_at DESC (newest batch
+// first), then by reverse insertion order within the same batch. Stable.
 let _newSortedSrc = null;
 let _newSortedPool = null;
 function newSorted(pool) {
   if (_newSortedSrc === pool && _newSortedPool) return _newSortedPool;
+  // Build a position index so ties resolve in reverse-insertion order
   const pos = new Map();
   for (let i = 0; i < pool.length; i++) pos.set(pool[i], i);
   const arr = pool.slice().sort((a, b) => {
-    const aa = a.added_at || 1;
-    const bb = b.added_at || 1;
-    if (aa !== bb) return bb - aa;
-    return pos.get(b) - pos.get(a);
+    const aa = a.a || a.added_at || 1;
+    const bb = b.a || b.added_at || 1;
+    if (aa !== bb) return bb - aa;          // higher added_at = newer = first
+    return pos.get(b) - pos.get(a);          // within same batch, later in array = first
   });
   _newSortedSrc = pool;
   _newSortedPool = arr;
   return arr;
 }
 
-// Downloads sort — uses live download counts. Stable: ties keep pool order.
+// Downloads sort — uses live KV download-counts. Stable: ties keep pool order.
 function downloadsSorted(pool, counts) {
   return pool.slice().sort((a, b) => {
     const da = counts[recId(a)] || 0;
@@ -266,7 +287,7 @@ async function callGiphy(env, endpoint, params) {
   const url = new URL(`https://api.giphy.com/v1/${endpoint}`);
   url.searchParams.set('api_key', apiKey);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const r = await fetch(url.toString());
+  const r = await fetch(url.toString(), { cf: { cacheTtl: 300 } });
   if (!r.ok) return null;
   return await r.json();
 }
@@ -311,27 +332,22 @@ function categoryPriority(cat) {
 
 /* ---------- Request handler ---------- */
 
-export async function handler(event) {
-  const env = process.env;
-  const q = event.queryStringParameters || {};
-  const params = new URLSearchParams(q);
-  const method = event.httpMethod || 'GET';
+export async function onRequest(context) {
+  const { request, env } = context;
+  const url = new URL(request.url);
+  const params = url.searchParams;
 
-  if (method === 'OPTIONS') {
-    return {
-      statusCode: 204,
-      headers: {
-        'access-control-allow-origin': '*',
-        'access-control-allow-methods': 'GET, OPTIONS',
-        'access-control-allow-headers': 'Content-Type',
-      },
-      body: '',
-    };
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-allow-headers': 'Content-Type',
+    }});
   }
 
   // Categories endpoint — uses precomputed cat_counts when available
   if (params.get('categories') === '1') {
-    const fb = await loadFallback();
+    const fb = await loadFallback(request);
     const gifs = fb.gifs || [];
     let counts = fb.cat_counts || null;
     if (!counts) {
@@ -372,15 +388,15 @@ export async function handler(event) {
         gifs.forEach(g => g.cat = cat);
         // Live API has no global sort — apply to the returned page slice
         if (sortParam === 'name' || sortParam === 'popular') {
-          const counts = sortParam === 'popular' ? await loadPlays() : null;
+          const counts = sortParam === 'popular' ? await loadPlays(env) : null;
           gifs.sort((a, b) => {
             if (sortParam === 'name') {
-              const an = (a.title || '').toLowerCase();
-              const bn = (b.title || '').toLowerCase();
-              return an < bn ? -1 : an > bn ? 1 : (a.id < b.id ? -1 : 1);
+              const an = (a.title || a.t || '').toLowerCase();
+              const bn = (b.title || b.t || '').toLowerCase();
+              return an < bn ? -1 : an > bn ? 1 : ((a.id||a.i) < (b.id||b.i) ? -1 : 1);
             }
-            const pa = (a.plays || 0) + (counts[a.id] || 0);
-            const pb = (b.plays || 0) + (counts[b.id] || 0);
+            const pa = (a.plays || a.pl || a.p || 0) + (counts[a.id || a.i] || 0);
+            const pb = (b.plays || b.pl || b.p || 0) + (counts[b.id || b.i] || 0);
             return pb - pa; // stable
           });
         }
@@ -396,7 +412,7 @@ export async function handler(event) {
   }
 
   // Fallback database (compact v3)
-  const fb = await loadFallback();
+  const fb = await loadFallback(request);
   let pool = fb.gifs || [];
   if (pool.length === 0) {
     return json({ ok: false, gifs: [], total: 0, source: 'none', error: 'no_api_key_and_no_fallback' }, 200, 30);
@@ -431,22 +447,24 @@ export async function handler(event) {
     }
   }
   // trending: JSON is pre-sorted at build time — pure slice, no sort cost.
-  // name/popular/new/downloads: sort the WHOLE pool server-side so pagination stays ordered.
+  // name/popular/new/downloads: sort the WHOLE pool server-side so every
+  // pagination window stays globally ordered (client just appends pages in
+  // arrival order).
   let cacheAge = 60;
   if (sortParam === 'name') {
     pool = nameSorted(pool);
-    cacheAge = 300;
+    cacheAge = 300; // static data — safe to cache longer
   } else if (sortParam === 'popular') {
-    const counts = await loadPlays();
+    const counts = await loadPlays(env);
     pool = popularSorted(pool, counts);
-    cacheAge = 30;
+    cacheAge = 30; // counts evolve — keep short
   } else if (sortParam === 'new') {
     pool = newSorted(pool);
-    cacheAge = 300;
+    cacheAge = 300; // added_at is static — safe to cache longer
   } else if (sortParam === 'downloads') {
-    const dlCounts = await loadDownloads();
+    const dlCounts = await loadDownloads(env);
     pool = downloadsSorted(pool, dlCounts);
-    cacheAge = 30;
+    cacheAge = 30; // counts evolve — keep short
   }
 
   const slice = pool.slice(offset, offset + limit).map(expandRecord);
