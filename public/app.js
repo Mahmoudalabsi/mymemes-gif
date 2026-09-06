@@ -4,6 +4,7 @@
    - Light (default) + Dark theme, persisted in localStorage
    - Giphy-backed GIF browsing with curated fallback database
    - Per-GIF play counter (in-memory + localStorage + global sync)
+   - Per-GIF download counter (separate KV key, independent from plays)
    - Category filter · search · infinite scroll · lightbox
    ============================================================ */
 
@@ -13,6 +14,7 @@ const PAGE_SIZE = 24;
 const LS_KEY_THEME = 'mymemes_theme';
 const LS_KEY_LANG = 'mymemes_lang';
 const LS_KEY_PLAYS = 'mymemes_gif_plays';
+const LS_KEY_DOWNLOADS = 'mymemes_gif_downloads';
 const LS_KEY_LASTCAT = 'mymemes_gif_lastcat';
 const LS_KEY_LASTSORT = 'mymemes_gif_lastsort';
 
@@ -31,6 +33,7 @@ const I18N = {
     statGifs: 'GIFs',
     statCategories: 'Categories',
     statPlays: 'Plays',
+    statDownloads: 'Downloads',
     categoriesTitle: 'Categories',
     sortBy: 'Sort:',
     sortTrending: 'Trending',
@@ -44,6 +47,7 @@ const I18N = {
     allLoaded: 'All GIFs loaded',
     gifsFrom: 'GIFs from',
     playsCount: 'plays',
+    downloadsCount: 'downloads',
     langName: 'English',
     catTrending: 'Trending', catClassic: 'Classic Memes', catReactions: 'Reactions', catAnimals: 'Animals', catAnime: 'Anime',
     catGaming: 'Gaming', catMovies: 'Movies', catMusic: 'Music', catSports: 'Sports',
@@ -68,6 +72,7 @@ const I18N = {
     statGifs: 'صور متحركة',
     statCategories: 'أقسام',
     statPlays: 'مشاهدات',
+    statDownloads: 'تنزيلات',
     categoriesTitle: 'الأقسام',
     sortBy: 'ترتيب:',
     sortTrending: 'الرائج',
@@ -81,6 +86,7 @@ const I18N = {
     allLoaded: 'تم تحميل كل الصور',
     gifsFrom: 'الصور من',
     playsCount: 'مشاهدة',
+    downloadsCount: 'تنزيل',
     langName: 'العربية',
     catTrending: 'الرائج', catClassic: 'ميمز شهيرة', catReactions: 'ردود الأفعال', catAnimals: 'حيوانات', catAnime: 'أنمي',
     catGaming: 'ألعاب', catMovies: 'أفلام', catMusic: 'موسيقى', catSports: 'رياضة',
@@ -105,6 +111,7 @@ const I18N = {
     statGifs: 'GIF-uri',
     statCategories: 'Categorii',
     statPlays: 'Vizionări',
+    statDownloads: 'Descărcări',
     categoriesTitle: 'Categorii',
     sortBy: 'Sortează:',
     sortTrending: 'Populare',
@@ -118,6 +125,7 @@ const I18N = {
     allLoaded: 'Toate GIF-urile au fost încărcate',
     gifsFrom: 'GIF-uri de la',
     playsCount: 'vizionări',
+    downloadsCount: 'descărcări',
     langName: 'Română',
     catTrending: 'Populare', catClassic: 'Meme-uri Celebre', catReactions: 'Reacții', catAnimals: 'Animale', catAnime: 'Anime',
     catGaming: 'Jocuri', catMovies: 'Filme', catMusic: 'Muzică', catSports: 'Sport',
@@ -147,6 +155,8 @@ let state = {
   categories: [],
   globalPlays: {},
   localPlays: {},
+  globalDownloads: {},
+  localDownloads: {},
 };
 
 function detectDefaultLang() {
@@ -183,6 +193,9 @@ function giphyEndpoint(params) {
 function playsEndpoint() {
   return PLAT === 'netlify' ? '/.netlify/functions/plays' : '/api/plays';
 }
+function downloadsEndpoint() {
+  return PLAT === 'netlify' ? '/.netlify/functions/downloads' : '/api/downloads';
+}
 function downloadEndpoint() {
   return PLAT === 'netlify' ? '/.netlify/functions/download' : '/download';
 }
@@ -195,6 +208,16 @@ function loadLocalPlays() {
 }
 function saveLocalPlays() {
   try { localStorage.setItem(LS_KEY_PLAYS, JSON.stringify(state.localPlays)); } catch (e) {}
+}
+
+/* ---------- Local downloads storage ---------- */
+function loadLocalDownloads() {
+  try {
+    state.localDownloads = JSON.parse(localStorage.getItem(LS_KEY_DOWNLOADS) || '{}');
+  } catch (e) { state.localDownloads = {}; }
+}
+function saveLocalDownloads() {
+  try { localStorage.setItem(LS_KEY_DOWNLOADS, JSON.stringify(state.localDownloads)); } catch (e) {}
 }
 
 function effectivePlays(gifId, basePlays) {
@@ -225,6 +248,32 @@ function registerPlay(gif) {
   }
 }
 
+/* ---------- Per-GIF download counter ---------- */
+function effectiveDownloads(gifId) {
+  const local = state.localDownloads[gifId] || 0;
+  const global = state.globalDownloads[gifId] || 0;
+  return Math.max(local, global);
+}
+
+function registerDownload(gif) {
+  const id = gif.id;
+  state.localDownloads[id] = (state.localDownloads[id] || 0) + 1;
+  saveLocalDownloads();
+  // Fire-and-forget global increment
+  fetch(downloadsEndpoint(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug: id })
+  }).catch(() => {});
+  // Update UI immediately on the card and in the lightbox if open
+  const next = effectiveDownloads(id) + 1;
+  document.querySelectorAll(`.gif-card[data-id="${id}"] .gif-card-downloads-count`).forEach(el => {
+    el.textContent = formatNumber(next);
+  });
+  const lbDl = document.querySelector('.lightbox-downloads-count');
+  if (lbDl) lbDl.textContent = formatNumber(next);
+}
+
 function formatNumber(n) {
   n = Number(n) || 0;
   if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0', '') + 'M';
@@ -246,6 +295,30 @@ async function syncGlobalPlays() {
       if (footer) footer.textContent = formatNumber(total);
       const heroStat = $('#stat-plays');
       if (heroStat) heroStat.textContent = formatNumber(total);
+    }
+  } catch (e) {}
+}
+
+/* ---------- Global downloads sync ---------- */
+async function syncGlobalDownloads() {
+  try {
+    const r = await fetch(downloadsEndpoint(), { method: 'GET' });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data && data.counts) {
+      state.globalDownloads = data.counts;
+      let total = 0;
+      for (const k of Object.keys(data.counts)) total += data.counts[k];
+      const footer = $('#footer-downloads');
+      if (footer) footer.textContent = formatNumber(total);
+      const heroStat = $('#stat-downloads');
+      if (heroStat) heroStat.textContent = formatNumber(total);
+      // Refresh visible card counters so the new global value shows up
+      document.querySelectorAll('.gif-card').forEach(card => {
+        const id = card.getAttribute('data-id');
+        const el = card.querySelector('.gif-card-downloads-count');
+        if (el) el.textContent = formatNumber(effectiveDownloads(id));
+      });
     }
   } catch (e) {}
 }
@@ -398,6 +471,7 @@ function renderGifCard(gif) {
   card.setAttribute('data-cat', gif.cat || 'trending');
 
   const plays = effectivePlays(gif.id, gif.plays);
+  const downloads = effectiveDownloads(gif.id);
   const title = escapeHtml(gif.title || 'GIF');
   const cat = gif.cat || 'trending';
 
@@ -416,9 +490,15 @@ function renderGifCard(gif) {
       <div class="gif-card-title" title="${title}">${title}</div>
       <div class="gif-card-meta">
         <span class="gif-card-cat">${escapeHtml(catLabel(cat))}</span>
-        <span class="gif-card-plays">
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-          <span class="gif-card-plays-count">${formatNumber(plays)}</span>
+        <span class="gif-card-stats">
+          <span class="gif-card-plays" title="${dict.playsCount}">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            <span class="gif-card-plays-count">${formatNumber(plays)}</span>
+          </span>
+          <span class="gif-card-downloads" title="${dict.downloadsCount}">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <span class="gif-card-downloads-count">${formatNumber(downloads)}</span>
+          </span>
         </span>
       </div>
     </div>
@@ -481,6 +561,7 @@ function ensureLightbox() {
       <img class="lightbox-img" alt="">
       <div class="lightbox-body">
         <div class="lightbox-title"></div>
+        <div class="lightbox-stats"></div>
         <div class="lightbox-actions"></div>
       </div>
     </div>
@@ -503,6 +584,22 @@ function openLightbox(gif) {
   lb.querySelector('.lightbox-img').src = gif.url;
   lb.querySelector('.lightbox-img').alt = gif.title || 'GIF';
   lb.querySelector('.lightbox-title').textContent = gif.title || 'GIF';
+  // Stats: plays + downloads
+  const statsEl = lb.querySelector('.lightbox-stats');
+  if (statsEl) {
+    const plays = effectivePlays(gif.id, gif.plays);
+    const downloads = effectiveDownloads(gif.id);
+    statsEl.innerHTML = `
+      <span class="lb-stat">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        <span><span class="lb-plays-count">${formatNumber(plays)}</span> ${dict.playsCount}</span>
+      </span>
+      <span class="lb-stat">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        <span><span class="lightbox-downloads-count">${formatNumber(downloads)}</span> ${dict.downloadsCount}</span>
+      </span>
+    `;
+  }
   const actions = lb.querySelector('.lightbox-actions');
   actions.innerHTML = '';
   // Copy
@@ -574,6 +671,8 @@ async function copyToClipboard(text) {
 /* ---------- Download ---------- */
 function downloadGif(gif) {
   const dict = I18N[state.lang] || I18N.en;
+  // Count this download — separate counter from plays
+  registerDownload(gif);
   const name = (gif.slug || gif.title || 'mymemes-gif').replace(/[^\w\-]+/g, '-').slice(0, 60);
   // Use our download proxy to force attachment
   const url = `${downloadEndpoint()}?url=${encodeURIComponent(gif.url)}&name=${encodeURIComponent(name)}`;
@@ -791,6 +890,7 @@ function initSwitchSite() {
 /* ---------- Init ---------- */
 async function init() {
   loadLocalPlays();
+  loadLocalDownloads();
   initTheme();
   buildLangSwitcher();
   applyLang(state.lang);
@@ -802,10 +902,11 @@ async function init() {
   await detectPlatform();
   state.categories = await fetchCategories();
   renderCategories();
-  // Sync global plays before first render so counts are accurate
-  await syncGlobalPlays();
+  // Sync global plays + downloads before first render so counts are accurate
+  await Promise.all([syncGlobalPlays(), syncGlobalDownloads()]);
   // Periodic sync every 30s
   setInterval(syncGlobalPlays, 30000);
+  setInterval(syncGlobalDownloads, 30000);
   // Initial load
   await resetAndLoad();
 }

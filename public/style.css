@@ -427,9 +427,9 @@ html[data-theme="dark"] #theme-btn .icon-sun  { transform: translateY(0) rotate(
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 0 1.4rem;
+  padding: 0 0.9rem;
 }
-@media (min-width: 640px) { .stat { padding: 0 2.4rem; } }
+@media (min-width: 640px) { .stat { padding: 0 1.6rem; } }
 
 .stat-value {
   font-size: 1.4rem;
@@ -925,6 +925,13 @@ html[dir="rtl"] .line-dec { --dir-end: left; }
   font-size: 0.75rem;
   color: var(--fg-muted);
 }
+.footer-downloads {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
 
 /* ============================================
    HERO TITLE GRADIENT (subtle, not "AI-looking")
@@ -1141,6 +1148,22 @@ html[dir="rtl"] .switch-site-btn svg { transform: scaleX(-1); }
   white-space: nowrap;
 }
 
+.gif-card-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.gif-card-downloads {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  opacity: 0.85;
+}
+
 .gif-actions {
   display: flex;
   align-items: center;
@@ -1227,6 +1250,15 @@ html[dir="rtl"] .switch-site-btn svg { transform: scaleX(-1); }
   font-size: 1rem; font-weight: 700; margin-bottom: 0.5rem;
   color: var(--fg);
 }
+.lightbox-stats {
+  display: flex; flex-wrap: wrap; gap: 0.75rem 1.1rem;
+  font-size: 0.8rem; color: var(--fg-muted); font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+.lightbox-stats .lb-stat {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+}
+.lightbox-stats .lb-stat svg { color: var(--brand); }
 .lightbox-actions {
   display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem;
 }
