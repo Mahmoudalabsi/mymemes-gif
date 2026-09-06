@@ -307,14 +307,14 @@ function formatNumber(n) {
 // Result: the number always reflects library size + real activity, and
 // every shared link that gets opened pushes it visibly higher.
 function baselinePlays() {
-  const total = state.total || 0;
-  // ~5 baseline plays per GIF, rounded to nearest 100 for a clean look
-  return Math.floor((total * 5) / 100) * 100;
+  // Plays baseline = exactly the GIF catalog size. The hero counter then
+  // reads "N plays" where N matches "N GIFs", and every real play from any
+  // visitor (including people you shared a link with) pushes it above N.
+  return state.total || 0;
 }
 function baselineDownloads() {
-  const total = state.total || 0;
-  // ~1 baseline download per 3 GIFs, rounded to nearest 50
-  return Math.floor((total / 3) / 50) * 50;
+  // Downloads baseline = exactly the GIF catalog size (same rationale).
+  return state.total || 0;
 }
 function localPlaysTotal() {
   let n = 0;
