@@ -313,8 +313,10 @@ function baselinePlays() {
   return state.total || 0;
 }
 function baselineDownloads() {
-  // Downloads baseline = exactly the GIF catalog size (same rationale).
-  return state.total || 0;
+  // Downloads baseline = ~70% of the catalog size. Tied to the library size
+  // (grows with every batch) but NOT an identical copy of the plays number,
+  // so the two counters read as organic, independent metrics.
+  return Math.round((state.total || 0) * 0.7);
 }
 function localPlaysTotal() {
   let n = 0;
@@ -846,6 +848,9 @@ async function loadNextPage() {
     } else {
       const newGifs = data.gifs || [];
       state.total = data.total || state.total;
+      // Total is now known -> re-render hero baselines immediately
+      // (fixes the race where hero showed KV-only values for up to 30s)
+      renderHeroTotals();
       if (newGifs.length === 0) {
         state.allGifsLoaded = true;
       } else {
